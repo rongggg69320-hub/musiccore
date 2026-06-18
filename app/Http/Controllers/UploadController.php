@@ -181,78 +181,118 @@ class UploadController extends Controller
      */
     public function upload(Request $request)
     {
-        $genreId = $request->input('genre_id') ?? $request->input('genre');
-        if ($genreId !== null) {
-            $request->merge(['genre_id' => $genreId]);
-        }
+        try {
+            $genreId = $request->input('genre_id') ?? $request->input('genre');
+            if ($genreId !== null) {
+                $request->merge(['genre_id' => $genreId]);
+            }
 
-        Log::debug('UploadController.upload request', [
-            'has_file' => $request->hasFile('file'),
-            'content_length' => $request->header('content-length'),
-            'content_type' => $request->header('content-type'),
-            'authorization' => $request->header('authorization'),
-            'genre' => $request->input('genre'),
-            'genre_id' => $request->input('genre_id'),
-            'artist_name' => $request->input('artist_name'),
-            'all_input' => $request->except('file'),
-        ]);
+            Log::debug('UploadController.upload request', [
+                'has_file' => $request->hasFile('file'),
+                'content_length' => $request->header('content-length'),
+                'content_type' => $request->header('content-type'),
+                'authorization' => $request->header('authorization'),
+                'genre' => $request->input('genre'),
+                'genre_id' => $request->input('genre_id'),
+                'artist_name' => $request->input('artist_name'),
+                'all_input' => $request->except('file'),
+            ]);
 
-        Log::debug('UploadController.upload $_FILES', [
-            'files' => $_FILES,
-        ]);
+            Log::debug('UploadController.upload $_FILES', [
+                'files' => $_FILES,
+            ]);
 
-        $request->merge(['album_id' => $request->input('album_id') === '' ? null : $request->input('album_id')] );
-        $request->validate([
-            'title' => 'required|string|max:255',
-            'file' => 'required|file|mimes:mp3,wav,m4a,ogg,oga|max:20480',
-            'album_id' => 'nullable|integer|exists:albums,id',
-            'album' => 'nullable|string|max:255',
-            'genre_id' => 'nullable|integer',
-            'artist_name' => 'nullable|string|max:255',
-        ]);
+            $request->merge(['album_id' => $request->input('album_id') === '' ? null : $request->input('album_id')] );
+            $request->validate([
+                'title' => 'required|string|max:255',
+                'file' => 'required|file|mimes:mp3,wav,m4a,ogg,oga|max:102400',
+                'cover_image' => 'nullable|image|max:10240',
+                'album_id' => 'nullable|integer|exists:albums,id',
+                'album' => 'nullable|string|max:255',
+                'genre_id' => 'nullable|integer',
+                'artist_name' => 'nullable|string|max:255',
+            ]);
 
-        if (!$request->hasFile('file')) {
+            if (!$request->hasFile('file')) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'No file uploaded. Please select an audio file.',
+                ], 422);
+            }
+
+            $file = $request->file('file');
+            $path = $file->store('tracks', 'supabase_music');
+            if (!$path) {
+                Log::error('Audio file storage failed', [
+                    'disk' => 'supabase_music',
+                    'filename' => $file->getClientOriginalName(),
+                    'size' => $file->getSize(),
+                ]);
+
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Audio upload failed. Check the Supabase music bucket configuration.',
+                ], 500);
+            }
+
+            // store cover image if provided
+            $coverPath = null;
+            if ($request->hasFile('cover_image')) {
+                $cover = $request->file('cover_image');
+                $coverPath = $cover->store('covers', 'supabase_images');
+                if (!$coverPath) {
+                    Storage::disk('supabase_music')->delete($path);
+                    Log::error('Track cover image storage failed', [
+                        'disk' => 'supabase_images',
+                        'filename' => $cover->getClientOriginalName(),
+                        'size' => $cover->getSize(),
+                    ]);
+
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'Cover upload failed. Please try a different image.',
+                    ], 500);
+                }
+            }
+
+            $artist = $this->sanitizeArtistName($request->input('artist_name'));
+            $albumId = $request->input('album_id');
+            $albumTitle = null;
+            if ($albumId) {
+                $album = Album::find($albumId);
+                $albumTitle = $album ? $album->title : $request->input('album');
+            }
+
+            $track = Track::create([
+                'title' => $request->input('title'),
+                'user_id' => $request->user()?->id,
+                'artist_name' => $artist,
+                'album_id' => $albumId,
+                'album' => $albumTitle ?? $request->input('album'),
+                'genre_id' => $request->input('genre_id'),
+                'audio_file' => $path,
+                'cover_image' => $coverPath,
+                'status' => 'published',
+            ]);
+
+            return response()->json([
+                'success' => true,
+                'track' => $track,
+                'url' => SupabaseStorage::musicUrl($path),
+            ], 201);
+        } catch (\Illuminate\Validation\ValidationException $e) {
+            throw $e;
+        } catch (\Throwable $e) {
+            Log::error('Error in UploadController.upload', [
+                'message' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+
             return response()->json([
                 'success' => false,
-                'message' => 'No file uploaded. Please select an audio file.',
-            ], 422);
+                'message' => 'Track upload failed. Please try again.',
+            ], 500);
         }
-
-        $file = $request->file('file');
-        $path = $file->store('tracks', 'supabase_music');
-
-        // store cover image if provided
-        $coverPath = null;
-        if ($request->hasFile('cover_image')) {
-            $cover = $request->file('cover_image');
-            $coverPath = $cover->store('covers', 'supabase_images');
-        }
-
-        $artist = $this->sanitizeArtistName($request->input('artist_name'));
-        $albumId = $request->input('album_id');
-        $albumTitle = null;
-        if ($albumId) {
-            $album = Album::find($albumId);
-            $albumTitle = $album ? $album->title : $request->input('album');
-        }
-
-        $track = Track::create([
-            'title' => $request->input('title'),
-            'user_id' => $request->user()?->id,
-            'artist_name' => $artist,
-            'album_id' => $albumId,
-            'album' => $albumTitle ?? $request->input('album'),
-            'genre_id' => $request->input('genre_id'),
-            'audio_file' => $path,
-            'cover_image' => $coverPath,
-            'status' => 'published',
-        ]);
-
-        return response()->json([
-            'success' => true,
-            'track' => $track,
-            'url' => SupabaseStorage::musicUrl($path),
-        ], 201);
     }
 
     /**
