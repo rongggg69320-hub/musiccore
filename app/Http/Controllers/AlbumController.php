@@ -17,7 +17,7 @@ class AlbumController extends Controller
      */
     public function index()
     {
-        return Album::with(['user', 'genre'])->where('user_id', Auth::id())->latest()->get();
+        return Album::with($this->albumRelations())->where('user_id', Auth::id())->latest()->get();
     }
 
     /**
@@ -56,7 +56,7 @@ class AlbumController extends Controller
 
         Cache::forget('new_releases_albums');
 
-        return response()->json($album->load(['user', 'genre']), 201);
+        return response()->json($album->load($this->albumRelations()), 201);
     }
 
     /**
@@ -64,7 +64,12 @@ class AlbumController extends Controller
      */
     public function show($id)
     {
-        $album = Album::with(['tracks.user', 'tracks.genre', 'user', 'genre'])->findOrFail($id);
+        $album = Album::with([
+            'tracks.user:id,username,profile_image',
+            'tracks.genre:id,name',
+            'user:id,username,profile_image',
+            'genre:id,name',
+        ])->findOrFail($id);
         if ($album->status !== 'published' && $album->user_id !== Auth::id()) {
             return response()->json(['message' => 'Forbidden'], 403);
         }
@@ -77,15 +82,15 @@ class AlbumController extends Controller
      */
     public function tracks(Request $request, $id)
     {
-        $limit = (int) $request->query('limit', 10);
-        $offset = (int) $request->query('offset', 0);
+        $limit = $this->limit($request->query('limit', 10));
+        $offset = $this->offset($request->query('offset', 0));
 
         $album = Album::findOrFail($id);
         if ($album->status !== 'published' && $album->user_id !== Auth::id()) {
             return response()->json(['message' => 'Forbidden'], 403);
         }
 
-        return Track::with(['user', 'genre'])
+        return Track::with($this->trackRelations())
             ->where('album_id', $id)
             ->latest()
             ->offset($offset)
@@ -98,10 +103,10 @@ class AlbumController extends Controller
      */
     public function publicAlbums(Request $request)
     {
-        $limit = $request->query('limit', 20);
-        $offset = $request->query('offset', 0);
+        $limit = $this->limit($request->query('limit', 20));
+        $offset = $this->offset($request->query('offset', 0));
 
-        return Album::with(['user', 'genre'])
+        return Album::with($this->albumRelations())
             ->where('status', 'published')
             ->latest()
             ->offset($offset)
@@ -149,7 +154,7 @@ class AlbumController extends Controller
 
         Cache::forget('new_releases_albums');
 
-        return response()->json($album->load(['user', 'genre']));
+        return response()->json($album->load($this->albumRelations()));
     }
 
     /**
@@ -177,13 +182,46 @@ class AlbumController extends Controller
      */
     public function newReleases()
     {
-        $limit = request('limit', 10);
-        return Cache::remember('new_releases_albums', 600, function () use ($limit) {
-            return Album::with(['user', 'genre'])
+        $limit = $this->limit(request('limit', 10));
+
+        return Cache::remember("new_releases_albums:{$limit}", 600, function () use ($limit) {
+            return Album::with($this->albumRelations())
                 ->where('status', 'published')
                 ->latest()
                 ->limit($limit)
                 ->get();
         });
+    }
+
+    private function trackRelations(): array
+    {
+        return ['user:id,username,profile_image', 'genre:id,name'];
+    }
+
+    private function albumRelations(): array
+    {
+        return ['user:id,username,profile_image', 'genre:id,name'];
+    }
+
+    private function limit($value, int $default = 20, int $max = 50): int
+    {
+        $limit = filter_var($value, FILTER_VALIDATE_INT);
+
+        if ($limit === false || $limit < 1) {
+            return $default;
+        }
+
+        return min($limit, $max);
+    }
+
+    private function offset($value): int
+    {
+        $offset = filter_var($value, FILTER_VALIDATE_INT);
+
+        if ($offset === false || $offset < 0) {
+            return 0;
+        }
+
+        return $offset;
     }
 }

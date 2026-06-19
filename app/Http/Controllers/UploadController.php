@@ -31,7 +31,7 @@ class UploadController extends Controller
      */
     public function index()
     {
-        return Track::with(['user', 'genre'])->where('user_id', Auth::id())->latest()->get();
+        return Track::with($this->trackRelations())->where('user_id', Auth::id())->latest()->get();
     }
 
     /**
@@ -39,7 +39,7 @@ class UploadController extends Controller
      */
     public function show($id)
     {
-        return Track::with(['user', 'genre'])->findOrFail($id);
+        return Track::with($this->trackRelations())->findOrFail($id);
     }
 
     /**
@@ -90,7 +90,7 @@ class UploadController extends Controller
         $track->save();
         Cache::forget('new_releases_tracks');
 
-        return response()->json($track->load(['user', 'genre']));
+        return response()->json($track->load($this->trackRelations()));
     }
 
     /**
@@ -148,7 +148,7 @@ class UploadController extends Controller
 
         Cache::forget('new_releases_tracks');
 
-        return response()->json(['success' => true, 'track' => $track->load(['user', 'genre'])], 201);
+        return response()->json(['success' => true, 'track' => $track->load($this->trackRelations())], 201);
     }
 
     /**
@@ -156,8 +156,9 @@ class UploadController extends Controller
      */
     public function radio()
     {
-        $limit = request('limit', 20);
-        return Track::with(['user', 'genre'])->where('status', 'published')->inRandomOrder()->limit($limit)->get();
+        $limit = $this->limit(request('limit', 20));
+
+        return Track::with($this->trackRelations())->where('status', 'published')->inRandomOrder()->limit($limit)->get();
     }
 
     /**
@@ -165,9 +166,10 @@ class UploadController extends Controller
      */
     public function newReleases()
     {
-        $limit = request('limit', 10);
-        return Cache::remember('new_releases_tracks', 600, function () use ($limit) {
-            return Track::with(['user', 'genre'])->where('status', 'published')->latest()->limit($limit)->get();
+        $limit = $this->limit(request('limit', 10));
+
+        return Cache::remember("new_releases_tracks:{$limit}", 600, function () use ($limit) {
+            return Track::with($this->trackRelations())->where('status', 'published')->latest()->limit($limit)->get();
         });
     }
 
@@ -176,10 +178,10 @@ class UploadController extends Controller
      */
     public function publicTracks(Request $request)
     {
-        $limit = $request->query('limit', 20);
-        $offset = $request->query('offset', 0);
+        $limit = $this->limit($request->query('limit', 20));
+        $offset = $this->offset($request->query('offset', 0));
 
-        return Track::with(['user', 'genre'])->where('status', 'published')->latest()->offset($offset)->limit($limit)->get();
+        return Track::with($this->trackRelations())->where('status', 'published')->latest()->offset($offset)->limit($limit)->get();
     }
 
     /**
@@ -188,22 +190,32 @@ class UploadController extends Controller
     public function search(Request $request)
     {
         $q = trim($request->query('q', $request->query('query', '')));
-        $limit = (int) $request->query('limit', 20);
-        $offset = (int) $request->query('offset', 0);
+        $limit = $this->limit($request->query('limit', 20));
+        $offset = $this->offset($request->query('offset', 0));
 
         if ($q === '') return response()->json(['tracks' => [], 'albums' => [], 'artists' => []]);
 
-        $tracks = Track::with(['user', 'genre'])->where('status', 'published')
+        $tracks = Track::with($this->trackRelations())->where('status', 'published')
             ->where(function ($w) use ($q) {
-                $w->where('title', 'like', "%{$q}%")->orWhere('artist_name', 'like', "%{$q}%")->orWhere('album', 'like', "%{$q}%");
+                $w->where('title', 'like', "%{$q}%")
+                    ->orWhere('artist_name', 'like', "%{$q}%")
+                    ->orWhere('album', 'like', "%{$q}%")
+                    ->orWhereHas('user', function ($userQuery) use ($q) {
+                        $userQuery->where('username', 'like', "%{$q}%");
+                    });
             })->latest()->offset($offset)->limit($limit)->get();
 
-        $albums = Album::with(['user', 'genre'])->where('status', 'published')
+        $albums = Album::with($this->albumRelations())->where('status', 'published')
             ->where(function ($w) use ($q) {
                 $w->where('title', 'like', "%{$q}%")->orWhere('artist_name', 'like', "%{$q}%");
             })->latest()->offset($offset)->limit($limit)->get();
 
-        $artists = User::where('username', 'like', "%{$q}%")->latest()->offset($offset)->limit($limit)->get();
+        $artists = User::select(['id', 'username', 'profile_image', 'bio', 'created_at'])
+            ->where('username', 'like', "%{$q}%")
+            ->latest()
+            ->offset($offset)
+            ->limit($limit)
+            ->get();
 
         return response()->json(['tracks' => $tracks, 'albums' => $albums, 'artists' => $artists]);
     }
@@ -214,15 +226,22 @@ class UploadController extends Controller
     public function showUser($id)
     {
         $user = User::findOrFail($id);
-        $viewerId = Auth::id();
+
+        // Use auth('sanctum')->id() to get the authenticated user if token is present,
+        // even if the route is public.
+        $viewerId = auth('sanctum')->id();
 
         $user->load(['tracks' => function($q) use ($user, $viewerId) {
-            $q->with('genre');
-            if ($viewerId !== $user->id) $q->where('status', 'published');
+            $q->with('genre:id,name');
+            if ($viewerId !== $user->id) {
+                $q->where('status', 'published');
+            }
             $q->latest();
         }, 'albums' => function($q) use ($user, $viewerId) {
-            $q->with('genre');
-            if ($viewerId !== $user->id) $q->where('status', 'published');
+            $q->with('genre:id,name');
+            if ($viewerId !== $user->id) {
+                $q->where('status', 'published');
+            }
             $q->latest();
         }]);
 
@@ -234,11 +253,11 @@ class UploadController extends Controller
      */
     public function genreTracks($genreId)
     {
-        $limit = request('limit', 10);
-        $offset = request('offset', 0);
+        $limit = $this->limit(request('limit', 10));
+        $offset = $this->offset(request('offset', 0));
         $random = filter_var(request('random', false), FILTER_VALIDATE_BOOLEAN);
 
-        $query = Track::with(['user', 'genre'])->where('genre_id', $genreId)->where('status', 'published');
+        $query = Track::with($this->trackRelations())->where('genre_id', $genreId)->where('status', 'published');
         if ($random) $query->inRandomOrder();
         else $query->latest();
 
@@ -251,5 +270,37 @@ class UploadController extends Controller
         $trimmed = trim($artistName);
         if ($trimmed === '' || strtolower($trimmed) === 'unknown artist') return null;
         return $trimmed;
+    }
+
+    private function trackRelations(): array
+    {
+        return ['user:id,username,profile_image', 'genre:id,name'];
+    }
+
+    private function albumRelations(): array
+    {
+        return ['user:id,username,profile_image', 'genre:id,name'];
+    }
+
+    private function limit($value, int $default = 20, int $max = 50): int
+    {
+        $limit = filter_var($value, FILTER_VALIDATE_INT);
+
+        if ($limit === false || $limit < 1) {
+            return $default;
+        }
+
+        return min($limit, $max);
+    }
+
+    private function offset($value): int
+    {
+        $offset = filter_var($value, FILTER_VALIDATE_INT);
+
+        if ($offset === false || $offset < 0) {
+            return 0;
+        }
+
+        return $offset;
     }
 }

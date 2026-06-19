@@ -209,12 +209,25 @@ class AuthController extends Controller
         $user->bio = $validated['bio'] ?? $user->bio;
 
         if ($request->hasFile('profile_image')) {
-            if ($user->profile_image) Storage::disk('public')->delete($user->profile_image);
-            $user->profile_image = $request->file('profile_image')->store('profile_images', 'public');
+            $this->deleteStoredProfileImage($user->profile_image);
+            $user->profile_image = $request->file('profile_image')->store('profile_images', 'supabase_images');
         }
 
         $user->save();
-        return response()->json(['message' => 'Updated.', 'user' => $user]);
+        return response()->json([
+            'message' => 'Updated.',
+            'user' => $user->makeVisible(['profile_image_url', 'profile_pic_url', 'name']),
+        ]);
+    }
+
+    private function deleteStoredProfileImage(?string $profileImage): void
+    {
+        if (!$profileImage || filter_var($profileImage, FILTER_VALIDATE_URL)) {
+            return;
+        }
+
+        Storage::disk('supabase_images')->delete($profileImage);
+        Storage::disk('public')->delete($profileImage);
     }
 
     public function socialLogin(Request $request)

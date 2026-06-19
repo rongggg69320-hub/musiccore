@@ -3,6 +3,7 @@
 namespace App\Support;
 
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\Cache;
 
 class SupabaseStorage
 {
@@ -80,11 +81,15 @@ class SupabaseStorage
 
         try {
             $minutes = (int) config('filesystems.supabase_signed_url_minutes', 10080);
+            $cacheMinutes = max($minutes - 5, 1);
+            $cacheKey = 'supabase_temporary_url:'.sha1($disk.'|'.$bucket.'|'.ltrim($normalized, '/'));
 
-            return Storage::disk($disk)->temporaryUrl(
-                ltrim($normalized, '/'),
-                now()->addMinutes(max($minutes, 1))
-            );
+            return Cache::remember($cacheKey, now()->addMinutes($cacheMinutes), function () use ($disk, $normalized, $minutes) {
+                return Storage::disk($disk)->temporaryUrl(
+                    ltrim($normalized, '/'),
+                    now()->addMinutes(max($minutes, 1))
+                );
+            });
         } catch (\Throwable) {
             return null;
         }

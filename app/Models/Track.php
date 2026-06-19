@@ -21,7 +21,7 @@ class Track extends Model
         'status',
     ];
 
-    protected $appends = ['audio_url', 'cover_url', 'genre_name'];
+    protected $appends = ['audio_url', 'cover_url', 'genre_name', 'username'];
 
     public function getAudioUrlAttribute()
     {
@@ -36,6 +36,11 @@ class Track extends Model
     public function getGenreNameAttribute()
     {
         return $this->genre?->name;
+    }
+
+    public function getUsernameAttribute()
+    {
+        return $this->user?->username;
     }
 
     public function genre()
