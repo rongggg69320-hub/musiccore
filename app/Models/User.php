@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Laravel\Sanctum\HasApiTokens;
+use App\Support\SupabaseStorage;
 
 class User extends Authenticatable
 {
@@ -26,6 +27,27 @@ class User extends Authenticatable
         'last_login',
         'status',
     ];
+
+    protected $appends = ['profile_image_url', 'profile_pic_url', 'name'];
+
+    public function getProfileImageUrlAttribute()
+    {
+        $profileImage = $this->profile_image;
+        if ($profileImage && filter_var($profileImage, FILTER_VALIDATE_URL)) {
+            return $profileImage;
+        }
+        return SupabaseStorage::imageUrl($profileImage);
+    }
+
+    public function getProfilePicUrlAttribute()
+    {
+        return $this->profile_image_url;
+    }
+
+    public function getNameAttribute()
+    {
+        return $this->username;
+    }
 
     protected $hidden = [
         'password',
@@ -56,5 +78,15 @@ class User extends Authenticatable
     public function role()
     {
         return $this->belongsTo(Role::class);
+    }
+
+    public function tracks()
+    {
+        return $this->hasMany(Track::class);
+    }
+
+    public function albums()
+    {
+        return $this->hasMany(Album::class);
     }
 }

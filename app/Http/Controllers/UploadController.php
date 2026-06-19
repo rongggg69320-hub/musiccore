@@ -12,40 +12,26 @@ use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Cache;
 
 class UploadController extends Controller
 {
     /**
-     * List genres
+     * List genres - Cached for 24 hours
      */
     public function listGenres()
     {
-        return Genre::all(['id', 'name']);
+        return Cache::remember('genres_list', 86400, function () {
+            return Genre::all(['id', 'name']);
+        });
     }
 
     /**
-     * List tracks
+     * List tracks for authenticated user
      */
     public function index()
     {
-        $userId = Auth::id();
-        $tracks = Track::with('user')->where('user_id', $userId)->latest()->get();
-
-        // Map to include full URLs for audio and cover images
-        $mapped = $tracks->map(function (Track $t) {
-            $arr = $t->toArray();
-            $arr['audio_url'] = SupabaseStorage::musicUrl($t->audio_file);
-            $arr['cover_url'] = SupabaseStorage::imageUrl($t->cover_image);
-            $arr['user'] = $t->user ? [
-                'id' => $t->user->id,
-                'username' => $t->user->username,
-                'name' => $t->user->username, // Use username as name
-            ] : null;
-            $arr['username'] = $t->user?->username;
-            return $arr;
-        });
-
-        return response()->json($mapped->values()->all());
+        return Track::with('user')->where('user_id', Auth::id())->latest()->get();
     }
 
     /**
@@ -53,17 +39,7 @@ class UploadController extends Controller
      */
     public function show($id)
     {
-        $track = Track::with('user')->findOrFail($id);
-        $arr = $track->toArray();
-        $arr['audio_url'] = SupabaseStorage::musicUrl($track->audio_file);
-        $arr['cover_url'] = SupabaseStorage::imageUrl($track->cover_image);
-        $arr['user'] = $track->user ? [
-            'id' => $track->user->id,
-            'username' => $track->user->username,
-            'name' => $track->user->username, // Use username as name
-        ] : null;
-        $arr['username'] = $track->user?->username;
-        return response()->json($arr);
+        return Track::with('user')->findOrFail($id);
     }
 
     /**
@@ -71,87 +47,50 @@ class UploadController extends Controller
      */
     public function update(Request $request, $id)
     {
-        try {
-            $track = Track::findOrFail($id);
-            if ($track->user_id !== Auth::id()) {
-                Log::warning('Unauthorized update attempt', ['track_id' => $id, 'user_id' => Auth::id()]);
-                return response()->json(['message' => 'Forbidden'], 403);
-            }
+        $track = Track::findOrFail($id);
+        if ($track->user_id !== Auth::id()) {
+            return response()->json(['message' => 'Forbidden'], 403);
+        }
 
-            Log::debug('UploadController.update request', [
-                'id' => $id,
-                'has_cover' => $request->hasFile('cover_image'),
-                'content_length' => $request->header('content-length'),
-                'content_type' => $request->header('content-type'),
-                'authorization' => $request->header('authorization'),
-                'all_input' => $request->except('cover_image'),
-            ]);
+        $request->merge(['album_id' => $request->input('album_id') === '' ? null : $request->input('album_id')] );
+        $rules = [
+            'album_id' => 'nullable|integer|exists:albums,id',
+            'album' => 'nullable|string|max:255',
+            'genre_id' => 'nullable|integer',
+            'status' => 'nullable|string|max:255',
+            'artist_name' => 'nullable|string|max:255',
+            'title' => $request->has('title') ? 'required|string|max:255' : 'sometimes|string|max:255',
+        ];
 
-            $request->merge(['album_id' => $request->input('album_id') === '' ? null : $request->input('album_id')] );
-            $rules = [
-                'album_id' => 'nullable|integer|exists:albums,id',
-                'album' => 'nullable|string|max:255',
-                'genre_id' => 'nullable|integer',
-                'status' => 'nullable|string|max:255',
-                'artist_name' => 'nullable|string|max:255',
-            ];
-            if ($request->has('title')) {
-                $rules['title'] = 'required|string|max:255';
+        $request->validate($rules);
+
+        if ($request->hasFile('cover_image')) {
+            if ($track->cover_image) Storage::disk('supabase_images')->delete($track->cover_image);
+            $track->cover_image = $request->file('cover_image')->store('covers', 'supabase_images');
+        }
+
+        if ($request->has('title')) $track->title = $request->input('title');
+        if ($request->has('artist_name')) $track->artist_name = $this->sanitizeArtistName($request->input('artist_name'));
+
+        if ($request->has('album_id')) {
+            $track->album_id = $request->input('album_id');
+            if ($track->album_id) {
+                $album = Album::find($track->album_id);
+                $track->album = $album ? $album->title : $request->input('album');
             } else {
-                $rules['title'] = 'sometimes|string|max:255';
-            }
-
-            $request->validate($rules);
-
-            if ($request->hasFile('cover_image')) {
-                // store new cover
-                $cover = $request->file('cover_image');
-                $coverPath = $cover->store('covers', 'supabase_images');
-                $track->cover_image = $coverPath;
-            }
-
-            if ($request->has('title')) {
-                $track->title = $request->input('title');
-            }
-            if ($request->has('artist_name')) {
-                $track->artist_name = $this->sanitizeArtistName($request->input('artist_name'));
-            }
-
-            if ($request->has('album_id')) {
-                $track->album_id = $request->input('album_id');
-                if ($request->input('album_id')) {
-                    $album = Album::find($request->input('album_id'));
-                    $track->album = $album ? $album->title : $request->input('album');
-                } else {
-                    $track->album = $request->input('album');
-                }
-            } elseif ($request->has('album')) {
                 $track->album = $request->input('album');
             }
-
-            if ($request->has('genre_id')) {
-                $track->genre_id = $request->input('genre_id');
-            }
-            if ($request->has('status')) {
-                $track->status = $request->input('status');
-            }
-
-            $track->save();
-
-            $arr = $track->toArray();
-            $arr['audio_url'] = SupabaseStorage::musicUrl($track->audio_file);
-            $arr['cover_url'] = SupabaseStorage::imageUrl($track->cover_image);
-
-            Log::info('Track updated', ['track_id' => $track->id, 'user_id' => $track->user_id]);
-
-            return response()->json($arr);
-        } catch (\Exception $e) {
-            Log::error('Error in UploadController.update', [
-                'message' => $e->getMessage(),
-                'trace' => $e->getTraceAsString(),
-            ]);
-            return response()->json(['message' => 'Server error'], 500);
+        } elseif ($request->has('album')) {
+            $track->album = $request->input('album');
         }
+
+        if ($request->has('genre_id')) $track->genre_id = $request->input('genre_id');
+        if ($request->has('status')) $track->status = $request->input('status');
+
+        $track->save();
+        Cache::forget('new_releases_tracks');
+
+        return response()->json($track);
     }
 
     /**
@@ -164,254 +103,83 @@ class UploadController extends Controller
             return response()->json(['message' => 'Forbidden'], 403);
         }
 
-        // delete files if present
-        if ($track->audio_file) {
-            Storage::disk('supabase_music')->delete($track->audio_file);
-        }
-        if ($track->cover_image) {
-            Storage::disk('supabase_images')->delete($track->cover_image);
-        }
+        if ($track->audio_file) Storage::disk('supabase_music')->delete($track->audio_file);
+        if ($track->cover_image) Storage::disk('supabase_images')->delete($track->cover_image);
 
         $track->delete();
+        Cache::forget('new_releases_tracks');
 
         return response()->json(['success' => true]);
     }
 
     /**
-     * Handle audio upload (audio-only)
+     * Handle audio upload
      */
     public function upload(Request $request)
     {
-        try {
-            $genreId = $request->input('genre_id') ?? $request->input('genre');
-            if ($genreId !== null) {
-                $request->merge(['genre_id' => $genreId]);
-            }
+        $request->merge(['album_id' => $request->input('album_id') === '' ? null : $request->input('album_id')] );
+        $request->validate([
+            'title' => 'required|string|max:255',
+            'file' => 'required|file|mimes:mp3,wav,m4a,ogg,oga|max:51200', // 50MB
+            'cover_image' => 'nullable|image|max:10240',
+            'album_id' => 'nullable|integer|exists:albums,id',
+            'album' => 'nullable|string|max:255',
+            'genre_id' => 'nullable|integer',
+            'artist_name' => 'nullable|string|max:255',
+        ]);
 
-            Log::debug('UploadController.upload request', [
-                'has_file' => $request->hasFile('file'),
-                'content_length' => $request->header('content-length'),
-                'content_type' => $request->header('content-type'),
-                'authorization' => $request->header('authorization'),
-                'genre' => $request->input('genre'),
-                'genre_id' => $request->input('genre_id'),
-                'artist_name' => $request->input('artist_name'),
-                'all_input' => $request->except('file'),
-            ]);
+        $path = $request->file('file')->store('tracks', 'supabase_music');
+        $coverPath = $request->hasFile('cover_image') ? $request->file('cover_image')->store('covers', 'supabase_images') : null;
 
-            Log::debug('UploadController.upload $_FILES', [
-                'files' => $_FILES,
-            ]);
+        $albumId = $request->input('album_id');
+        $albumTitle = $albumId ? (Album::find($albumId)->title ?? $request->input('album')) : $request->input('album');
 
-            $request->merge(['album_id' => $request->input('album_id') === '' ? null : $request->input('album_id')] );
-            $request->validate([
-                'title' => 'required|string|max:255',
-                'file' => 'required|file|mimes:mp3,wav,m4a,ogg,oga|max:102400',
-                'cover_image' => 'nullable|image|max:10240',
-                'album_id' => 'nullable|integer|exists:albums,id',
-                'album' => 'nullable|string|max:255',
-                'genre_id' => 'nullable|integer',
-                'artist_name' => 'nullable|string|max:255',
-            ]);
+        $track = Track::create([
+            'title' => $request->input('title'),
+            'user_id' => Auth::id(),
+            'artist_name' => $this->sanitizeArtistName($request->input('artist_name')),
+            'album_id' => $albumId,
+            'album' => $albumTitle,
+            'genre_id' => $request->input('genre_id'),
+            'audio_file' => $path,
+            'cover_image' => $coverPath,
+            'status' => 'published',
+        ]);
 
-            if (!$request->hasFile('file')) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'No file uploaded. Please select an audio file.',
-                ], 422);
-            }
+        Cache::forget('new_releases_tracks');
 
-            $file = $request->file('file');
-            $path = $file->store('tracks', 'supabase_music');
-            if (!$path) {
-                Log::error('Audio file storage failed', [
-                    'disk' => 'supabase_music',
-                    'filename' => $file->getClientOriginalName(),
-                    'size' => $file->getSize(),
-                ]);
-
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Audio upload failed. Check the Supabase music bucket configuration.',
-                ], 500);
-            }
-
-            // store cover image if provided
-            $coverPath = null;
-            if ($request->hasFile('cover_image')) {
-                $cover = $request->file('cover_image');
-                $coverPath = $cover->store('covers', 'supabase_images');
-                if (!$coverPath) {
-                    Storage::disk('supabase_music')->delete($path);
-                    Log::error('Track cover image storage failed', [
-                        'disk' => 'supabase_images',
-                        'filename' => $cover->getClientOriginalName(),
-                        'size' => $cover->getSize(),
-                    ]);
-
-                    return response()->json([
-                        'success' => false,
-                        'message' => 'Cover upload failed. Please try a different image.',
-                    ], 500);
-                }
-            }
-
-            $artist = $this->sanitizeArtistName($request->input('artist_name'));
-            $albumId = $request->input('album_id');
-            $albumTitle = null;
-            if ($albumId) {
-                $album = Album::find($albumId);
-                $albumTitle = $album ? $album->title : $request->input('album');
-            }
-
-            Log::info('Audio file stored', [
-                'disk' => 'supabase_music',
-                'path' => $path,
-                'user_id' => $request->user()?->id,
-            ]);
-
-            try {
-                $track = DB::transaction(function () use ($request, $artist, $albumId, $albumTitle, $path, $coverPath) {
-                    return Track::create([
-                        'title' => $request->input('title'),
-                        'user_id' => $request->user()?->id,
-                        'artist_name' => $artist,
-                        'album_id' => $albumId,
-                        'album' => $albumTitle ?? $request->input('album'),
-                        'genre_id' => $request->input('genre_id'),
-                        'audio_file' => $path,
-                        'cover_image' => $coverPath,
-                        'status' => 'published',
-                    ]);
-                });
-            } catch (\Throwable $e) {
-                Storage::disk('supabase_music')->delete($path);
-                if ($coverPath) {
-                    Storage::disk('supabase_images')->delete($coverPath);
-                }
-
-                Log::error('Track database insert failed after file upload', [
-                    'message' => $e->getMessage(),
-                    'audio_path' => $path,
-                    'cover_path' => $coverPath,
-                    'user_id' => $request->user()?->id,
-                ]);
-
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Audio was uploaded, but the track could not be saved to the database.',
-                ], 500);
-            }
-
-            Log::info('Track uploaded', [
-                'track_id' => $track->id,
-                'user_id' => $track->user_id,
-                'audio_file' => $track->audio_file,
-                'cover_image' => $track->cover_image,
-            ]);
-
-            return response()->json([
-                'success' => true,
-                'track' => $track,
-                'audio_file' => $path,
-                'url' => SupabaseStorage::musicUrl($path),
-            ], 201);
-        } catch (\Illuminate\Validation\ValidationException $e) {
-            throw $e;
-        } catch (\Throwable $e) {
-            Log::error('Error in UploadController.upload', [
-                'message' => $e->getMessage(),
-                'trace' => $e->getTraceAsString(),
-            ]);
-
-            return response()->json([
-                'success' => false,
-                'message' => 'Track upload failed. Please try again.',
-            ], 500);
-        }
+        return response()->json(['success' => true, 'track' => $track], 201);
     }
 
     /**
-     * Get random tracks for radio (shuffled)
+     * Shuffled tracks for radio
      */
     public function radio()
     {
         $limit = request('limit', 20);
-        $tracks = Track::with('user')
-            ->where('status', 'published')
-            ->inRandomOrder()
-            ->limit($limit)
-            ->get();
-
-        $mapped = $tracks->map(function (Track $t) {
-            $arr = $t->toArray();
-            $arr['audio_url'] = SupabaseStorage::musicUrl($t->audio_file);
-            $arr['cover_url'] = SupabaseStorage::imageUrl($t->cover_image);
-            $arr['user'] = $t->user ? [
-                'id' => $t->user->id,
-                'username' => $t->user->username,
-                'name' => $t->user->username, // Use username as name
-            ] : null;
-            $arr['username'] = $t->user?->username;
-            return $arr;
-        });
-
-        return response()->json($mapped->values()->all());
+        return Track::with('user')->where('status', 'published')->inRandomOrder()->limit($limit)->get();
     }
 
     /**
-     * Get new released tracks
+     * New releases - Cached for 10 minutes
      */
     public function newReleases()
     {
         $limit = request('limit', 10);
-        $tracks = Track::with('user')
-            ->where('status', 'published')
-            ->latest('created_at')
-            ->limit($limit)
-            ->get();
-
-        $mapped = $tracks->map(function (Track $t) {
-            $arr = $t->toArray();
-            $arr['audio_url'] = SupabaseStorage::musicUrl($t->audio_file);
-            $arr['cover_url'] = SupabaseStorage::imageUrl($t->cover_image);
-            $arr['user'] = $t->user ? [
-                'id' => $t->user->id,
-                'username' => $t->user->username,
-                'name' => $t->user->username, // Use username as name
-            ] : null;
-            $arr['username'] = $t->user?->username;
-            return $arr;
+        return Cache::remember('new_releases_tracks', 600, function () use ($limit) {
+            return Track::with('user')->where('status', 'published')->latest()->limit($limit)->get();
         });
-
-        return response()->json($mapped->values()->all());
     }
 
+    /**
+     * Public tracks with pagination
+     */
     public function publicTracks(Request $request)
     {
         $limit = $request->query('limit', 20);
         $offset = $request->query('offset', 0);
 
-        $query = Track::with('user')
-            ->where('status', 'published')
-            ->latest('created_at');
-
-        $tracks = $query->offset($offset)->limit($limit)->get();
-
-        $mapped = $tracks->map(function (Track $t) {
-            $arr = $t->toArray();
-            $arr['audio_url'] = SupabaseStorage::musicUrl($t->audio_file);
-            $arr['cover_url'] = SupabaseStorage::imageUrl($t->cover_image);
-            $arr['user'] = $t->user ? [
-                'id' => $t->user->id,
-                'username' => $t->user->username,
-                'name' => $t->user->username, // Use username as name
-            ] : null;
-            $arr['username'] = $t->user?->username;
-            return $arr;
-        });
-
-        return response()->json($mapped->values()->all());
+        return Track::with('user')->where('status', 'published')->latest()->offset($offset)->limit($limit)->get();
     }
 
     /**
@@ -419,184 +187,67 @@ class UploadController extends Controller
      */
     public function search(Request $request)
     {
-        // accept either `q` or `query` from clients
         $q = trim($request->query('q', $request->query('query', '')));
         $limit = (int) $request->query('limit', 20);
         $offset = (int) $request->query('offset', 0);
 
-        if ($q === '') {
-            return response()->json(['tracks' => [], 'albums' => [], 'artists' => []]);
-        }
+        if ($q === '') return response()->json(['tracks' => [], 'albums' => [], 'artists' => []]);
 
-        // tracks: only published
-        $tracksQuery = Track::with('user')
-            ->where('status', 'published')
+        $tracks = Track::with('user')->where('status', 'published')
             ->where(function ($w) use ($q) {
-                $w->where('title', 'like', "%{$q}%")
-                  ->orWhere('artist_name', 'like', "%{$q}%")
-                  ->orWhere('album', 'like', "%{$q}%")
-                  ->orWhereHas('user', function ($userQuery) use ($q) {
-                      $userQuery->where('username', 'like', "%{$q}%");
-                  });
-            })
-            ->latest('created_at')
-            ->offset($offset)
-            ->limit($limit);
+                $w->where('title', 'like', "%{$q}%")->orWhere('artist_name', 'like', "%{$q}%")->orWhere('album', 'like', "%{$q}%");
+            })->latest()->offset($offset)->limit($limit)->get();
 
-        $tracks = $tracksQuery->get()->map(function (Track $t) {
-            $arr = $t->toArray();
-            $arr['audio_url'] = SupabaseStorage::musicUrl($t->audio_file);
-            $arr['cover_url'] = SupabaseStorage::imageUrl($t->cover_image);
-            $arr['user'] = $t->user ? [
-                'id' => $t->user->id,
-                'username' => $t->user->username,
-                'name' => $t->user->username, // Use username as name
-            ] : null;
-            $arr['username'] = $t->user?->username;
-            return $arr;
-        })->values()->all();
-
-        // albums: only published
-        $albums = Album::with('user')
-            ->where('status', 'published')
+        $albums = Album::with('user')->where('status', 'published')
             ->where(function ($w) use ($q) {
-                $w->where('title', 'like', "%{$q}%")
-                  ->orWhere('artist_name', 'like', "%{$q}%");
-            })
-            ->latest('created_at')
-            ->offset($offset)
-            ->limit($limit)
-            ->get()
-            ->map(function ($album) {
-                $data = $album->toArray();
-                $data['cover_url'] = SupabaseStorage::imageUrl($album->cover_image);
-                $data['user'] = $album->user ? [
-                    'id' => $album->user->id,
-                    'username' => $album->user->username,
-                    'name' => $album->user->username, // Use username as name
-                ] : null;
-                $data['username'] = $album->user?->username;
-                return $data;
-            })->values()->all();
+                $w->where('title', 'like', "%{$q}%")->orWhere('artist_name', 'like', "%{$q}%");
+            })->latest()->offset($offset)->limit($limit)->get();
 
-        // artists (users) - keep key name as `artists` for frontend compatibility
-        $artists = User::where(function ($w) use ($q) {
-                $w->where('username', 'like', "%{$q}%");
-            })
-            ->latest('created_at')
-            ->offset($offset)
-            ->limit($limit)
-            ->get()
-            ->map(function ($user) {
-                $u = $user->toArray();
-                $u['name'] = $user->username; // Added for frontend compatibility
-                $u['profile_image_url'] = SupabaseStorage::imageUrl($user->profile_image);
-                return $u;
-            })->values()->all();
+        $artists = User::where('username', 'like', "%{$q}%")->latest()->offset($offset)->limit($limit)->get();
 
-        return response()->json([
-            'tracks' => $tracks,
-            'albums' => $albums,
-            'artists' => $artists,
-        ]);
+        return response()->json(['tracks' => $tracks, 'albums' => $albums, 'artists' => $artists]);
     }
 
     /**
-     * Show public user profile (with tracks and albums).
+     * Show public user profile
      */
     public function showUser($id)
     {
         $user = User::findOrFail($id);
-
         $viewerId = Auth::id();
-        $limit = (int) request('limit', 20);
-        $offset = (int) request('offset', 0);
 
-        $tracksQuery = Track::with('user')->where('user_id', $id);
-        if ($viewerId !== $user->id) {
-            $tracksQuery->where('status', 'published');
-        }
-        $tracks = $tracksQuery
-            ->latest('created_at')
-            ->offset($offset)
-            ->limit($limit)
-            ->get()
-            ->map(function (Track $t) {
-                $arr = $t->toArray();
-                $arr['audio_url'] = SupabaseStorage::musicUrl($t->audio_file);
-                $arr['cover_url'] = SupabaseStorage::imageUrl($t->cover_image);
-                $arr['username'] = $t->user?->username;
-                return $arr;
-            })->values()->all();
+        $user->load(['tracks' => function($q) use ($user, $viewerId) {
+            if ($viewerId !== $user->id) $q->where('status', 'published');
+            $q->latest();
+        }, 'albums' => function($q) use ($user, $viewerId) {
+            if ($viewerId !== $user->id) $q->where('status', 'published');
+            $q->latest();
+        }]);
 
-        $albumsQuery = Album::with('user')->where('user_id', $id);
-        if ($viewerId !== $user->id) {
-            $albumsQuery->where('status', 'published');
-        }
-        $albums = $albumsQuery->latest('created_at')->get()->map(function ($album) {
-            $data = $album->toArray();
-            $data['cover_url'] = SupabaseStorage::imageUrl($album->cover_image);
-            return $data;
-        })->values()->all();
-
-        $data = $user->toArray();
-        $data['name'] = $user->username;
-        $data['profile_image_url'] = SupabaseStorage::imageUrl($user->profile_image);
-        $data['tracks'] = $tracks;
-        $data['albums'] = $albums;
-
-        return response()->json($data);
+        return response()->json($user);
     }
 
+    /**
+     * Get tracks by genre
+     */
     public function genreTracks($genreId)
     {
         $limit = request('limit', 10);
         $offset = request('offset', 0);
         $random = filter_var(request('random', false), FILTER_VALIDATE_BOOLEAN);
 
-        $query = Track::with('user')
-            ->where('genre_id', $genreId)
-            ->where('status', 'published');
+        $query = Track::with('user')->where('genre_id', $genreId)->where('status', 'published');
+        if ($random) $query->inRandomOrder();
+        else $query->latest();
 
-        if ($random) {
-            $query->inRandomOrder();
-        } else {
-            $query->latest('created_at');
-        }
-
-        $tracks = $query->offset($offset)->limit($limit)->get();
-
-        $mapped = $tracks->map(function (Track $t) {
-            $arr = $t->toArray();
-            $arr['audio_url'] = SupabaseStorage::musicUrl($t->audio_file);
-            $arr['cover_url'] = SupabaseStorage::imageUrl($t->cover_image);
-            $arr['user'] = $t->user ? [
-                'id' => $t->user->id,
-                'username' => $t->user->username,
-                'name' => $t->user->username, // Use username as name
-            ] : null;
-            $arr['username'] = $t->user?->username;
-            return $arr;
-        });
-
-        return response()->json($mapped->values()->all());
+        return $query->offset($offset)->limit($limit)->get();
     }
 
     private function sanitizeArtistName($artistName)
     {
-        if ($artistName === null) {
-            return null;
-        }
-
+        if ($artistName === null) return null;
         $trimmed = trim($artistName);
-        if ($trimmed === '') {
-            return null;
-        }
-
-        if (strtolower($trimmed) === 'unknown artist') {
-            return null;
-        }
-
+        if ($trimmed === '' || strtolower($trimmed) === 'unknown artist') return null;
         return $trimmed;
     }
 }
