@@ -132,6 +132,14 @@ class AuthController extends Controller
         return response()->json(['message' => 'Login successful', 'user' => $session['user'], 'token' => $session['token']]);
     }
 
+    public function profile(Request $request)
+    {
+        $user = $request->user();
+        return response()->json([
+            'user' => $user->makeVisible(['profile_image_url', 'profile_pic_url', 'name']),
+        ]);
+    }
+
     public function logout(Request $request)
     {
         $request->user()?->currentAccessToken()?->delete();
@@ -216,23 +224,33 @@ class AuthController extends Controller
 
         if (!$profile) return response()->json(['message' => 'Verification failed.'], 401);
 
-        $email = strtolower($profile['email']);
+        $email = $profile['email'] ? strtolower($profile['email']) : null;
         $column = $request->provider === 'google' ? 'google_id' : 'facebook_id';
 
-        $user = User::where($column, $profile['id'])->orWhere('email', $email)->first();
+        $user = User::where($column, $profile['id']);
+        if ($email) {
+            $user->orWhere('email', $email);
+        }
+        $user = $user->first();
 
         if ($user) {
             if ($user->status !== 'active') return response()->json(['message' => 'Forbidden'], 403);
             $user->$column = $profile['id'];
+            if (!$user->profile_image && ($profile['picture'] ?? null)) {
+                $user->profile_image = $profile['picture'];
+            }
             $user->save();
         } else {
             $user = User::create([
                 'role_id' => 2,
-                'username' => $this->generateUniqueUsername($profile['name'] ?? explode('@', $email)[0]),
+                'username' => $this->generateUniqueUsername($profile['name'] ?? ($email ? explode('@', $email)[0] : 'user')),
                 'email' => $email,
                 'password' => Hash::make(random_bytes(16)),
                 'is_password_set' => false,
+                'profile_image' => $profile['picture'] ?? null,
                 $column => $profile['id'],
+                'social_provider' => $request->provider,
+                'social_id' => $profile['id'],
                 'status' => 'active',
             ]);
         }
@@ -368,17 +386,24 @@ class AuthController extends Controller
                     $data = $response->json();
                     return [
                         'id' => $data['sub'],
-                        'email' => $data['email'],
+                        'email' => $data['email'] ?? null,
                         'name' => $data['name'] ?? null,
+                        'picture' => $data['picture'] ?? null,
                     ];
                 }
             } elseif ($provider === 'facebook') {
                 $response = Http::get("https://graph.facebook.com/me", [
-                    'fields' => 'id,name,email',
+                    'fields' => 'id,name,email,picture.type(large)',
                     'access_token' => $token
                 ]);
                 if ($response->successful()) {
-                    return $response->json();
+                    $data = $response->json();
+                    return [
+                        'id' => $data['id'],
+                        'email' => $data['email'] ?? null,
+                        'name' => $data['name'] ?? null,
+                        'picture' => $data['picture']['data']['url'] ?? null,
+                    ];
                 }
             }
         } catch (Exception $e) {

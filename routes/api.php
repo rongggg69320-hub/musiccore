@@ -26,6 +26,7 @@ Route::get('/genres/{id}/tracks', [UploadController::class, 'genreTracks']);
 // Protected Routes
 Route::middleware('auth:sanctum')->group(function () {
 
+    Route::get('/me', [AuthController::class, 'profile']);
     Route::post('/logout', [AuthController::class, 'logout']);
     Route::post('/user/update', [AuthController::class, 'updateProfile']);
     Route::post('/user/security-code', [AuthController::class, 'sendSecurityCode']);
