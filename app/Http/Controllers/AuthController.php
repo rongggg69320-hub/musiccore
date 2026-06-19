@@ -71,58 +71,17 @@ class AuthController extends Controller
                 ['otp' => $otp, 'expires_at' => now()->addMinutes(15)]
             );
 
-            $apiKey = env('MAIL_PASSWORD');
+            // Reverting to standard Laravel Mail SMTP as requested
+            Mail::to($email)->send(new OtpMail($otp, $email));
 
-            // Fix: Resend API requires a verified domain OR onboarding@resend.dev
-            // If sender is a gmail address, it will almost certainly fail on Resend.
-            $fromAddr = env('MAIL_FROM_ADDRESS', 'onboarding@resend.dev');
-            if (str_contains($fromAddr, '@gmail.com')) {
-                $fromAddr = 'onboarding@resend.dev';
-            }
-
-            $response = Http::withToken($apiKey)->post('https://api.resend.com/emails', [
-                'from' => 'MusicStream <' . $fromAddr . '>',
-                'to' => [$email],
-                'subject' => 'Security Verification Code - MusicStream',
-                'html' => '
-                    <div style="font-family: sans-serif; padding: 20px; color: #333;">
-                        <h2>Security Verification Code</h2>
-                        <p>Hello,</p>
-                        <p>Your verification code for <strong>MusicStream</strong> is:</p>
-                        <div style="font-size: 32px; font-weight: bold; color: #2336B8; letter-spacing: 5px; padding: 10px; background: #f4f4f4; border-radius: 8px; display: inline-block;">' . $otp . '</div>
-                        <p>This code will expire in 15 minutes.</p>
-                        <p>If you did not request this code, please ignore this email.</p>
-                        <div style="margin-top: 20px; font-size: 12px; color: #777;">
-                            &copy; ' . date('Y') . ' MusicStream. All rights reserved.
-                        </div>
-                    </div>',
-            ]);
-
-            if ($response->successful()) {
-                Log::info("OTP sent via Resend API to: $email");
-                return response()->json(['message' => $successMessage]);
-            } else {
-                $errorBody = $response->json();
-                $errorMessage = $errorBody['message'] ?? $response->body();
-                Log::error('Resend API Failure: ' . $response->body());
-
-                // If it's a domain/onboarding error, give a helpful message
-                if (str_contains($errorMessage, 'onboarding')) {
-                    return response()->json([
-                        'message' => 'Resend Free Plan: You can only send to your own registered email address. Use onboarding@resend.dev as sender.'
-                    ], 403);
-                }
-
-                throw new Exception('Resend Error: ' . $errorMessage);
-            }
+            Log::info("OTP sent successfully via SMTP to: $email");
+            return response()->json(['message' => $successMessage]);
 
         } catch (Exception $e) {
             Log::error('OTP Mail Error: ' . $e->getMessage());
-            // Fallback: If in debug/testing, show code in error message to bypass block
-            return response()->json([
-                'message' => 'Email delivery failed. Code for testing: ' . $otp,
-                'debug' => $e->getMessage()
-            ], 500);
+            // Fallback to log for debugging if SMTP fails
+            Log::info("FALLBACK: OTP for $email is $otp");
+            return response()->json(['message' => 'Email delivery failed. Code saved to logs.'], 500);
         }
     }
 
