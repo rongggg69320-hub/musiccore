@@ -71,8 +71,8 @@ class AuthController extends Controller
                 ['otp' => $otp, 'expires_at' => now()->addMinutes(15)]
             );
 
-            // Reverting to standard Laravel Mail SMTP as requested
-            Mail::to($email)->send(new OtpMail($otp, $email));
+            // Using failover mailer to ensure delivery even if SMTP fails
+            Mail::mailer('failover')->to($email)->send(new OtpMail($otp, $email));
 
             Log::info("OTP sent successfully via SMTP to: $email");
             return response()->json(['message' => $successMessage]);
@@ -349,5 +349,33 @@ class AuthController extends Controller
         $user->save();
 
         return response()->json(['message' => 'Disconnected.', 'user' => $user]);
+    }
+
+    private function verifySocialToken(string $provider, string $token): ?array
+    {
+        try {
+            if ($provider === 'google') {
+                $response = Http::get("https://oauth2.googleapis.com/tokeninfo", ['id_token' => $token]);
+                if ($response->successful()) {
+                    $data = $response->json();
+                    return [
+                        'id' => $data['sub'],
+                        'email' => $data['email'],
+                        'name' => $data['name'] ?? null,
+                    ];
+                }
+            } elseif ($provider === 'facebook') {
+                $response = Http::get("https://graph.facebook.com/me", [
+                    'fields' => 'id,name,email',
+                    'access_token' => $token
+                ]);
+                if ($response->successful()) {
+                    return $response->json();
+                }
+            }
+        } catch (Exception $e) {
+            Log::error("Social Verification Error ({$provider}): " . $e->getMessage());
+        }
+        return null;
     }
 }
