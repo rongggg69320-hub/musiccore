@@ -90,7 +90,10 @@ class UploadController extends Controller
         $track->save();
         Cache::forget('new_releases_tracks');
 
-        return response()->json($track->load($this->trackRelations()));
+        return response()->json([
+            'success' => true,
+            'track' => $track->load($this->trackRelations())
+        ]);
     }
 
     /**
