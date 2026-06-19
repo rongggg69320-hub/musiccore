@@ -71,17 +71,25 @@ class AuthController extends Controller
                 ['otp' => $otp, 'expires_at' => now()->addMinutes(15)]
             );
 
-            // Using failover mailer to ensure delivery even if SMTP fails
-            Mail::to($email)->send(new OtpMail($otp, $email));
+            // Using failover mailer (Resend -> SMTP -> Log) to ensure delivery
+            Mail::mailer('failover')->to($email)->send(new OtpMail($otp, $email));
 
             Log::info("OTP sent successfully via SMTP to: $email");
             return response()->json(['message' => $successMessage]);
 
         } catch (Exception $e) {
             Log::error('OTP Mail Error: ' . $e->getMessage());
-            // Fallback to log for debugging if SMTP fails
+            // Fallback to log for debugging if SMTP/Resend fails
             Log::info("FALLBACK: OTP for $email is $otp");
-            return response()->json(['message' => 'Email delivery failed. Code saved to logs.'], 500);
+
+            // For development/local testing, we return success so they can check logs
+            if (config('app.debug') || app()->environment('local')) {
+                return response()->json([
+                    'message' => $successMessage . ' (Check server logs for the code)'
+                ]);
+            }
+
+            return response()->json(['message' => 'Email delivery failed. Please try again later.'], 500);
         }
     }
 
