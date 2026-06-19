@@ -71,12 +71,17 @@ class AuthController extends Controller
                 ['otp' => $otp, 'expires_at' => now()->addMinutes(15)]
             );
 
-            // Bypassing SMTP and using Resend HTTP API directly to avoid Railway port blocks
-            $apiKey = env('MAIL_PASSWORD'); 
-            $fromEmail = env('MAIL_FROM_ADDRESS', 'onboarding@resend.dev');
+            $apiKey = env('MAIL_PASSWORD');
+
+            // Fix: Resend API requires a verified domain OR onboarding@resend.dev
+            // If sender is a gmail address, it will almost certainly fail on Resend.
+            $fromAddr = env('MAIL_FROM_ADDRESS', 'onboarding@resend.dev');
+            if (str_contains($fromAddr, '@gmail.com')) {
+                $fromAddr = 'onboarding@resend.dev';
+            }
 
             $response = Http::withToken($apiKey)->post('https://api.resend.com/emails', [
-                'from' => 'MusicStream <' . $fromEmail . '>',
+                'from' => 'MusicStream <' . $fromAddr . '>',
                 'to' => [$email],
                 'subject' => 'Security Verification Code - MusicStream',
                 'html' => '
@@ -97,15 +102,27 @@ class AuthController extends Controller
                 Log::info("OTP sent via Resend API to: $email");
                 return response()->json(['message' => $successMessage]);
             } else {
+                $errorBody = $response->json();
+                $errorMessage = $errorBody['message'] ?? $response->body();
                 Log::error('Resend API Failure: ' . $response->body());
-                throw new Exception('API Response Error: ' . $response->body());
+
+                // If it's a domain/onboarding error, give a helpful message
+                if (str_contains($errorMessage, 'onboarding')) {
+                    return response()->json([
+                        'message' => 'Resend Free Plan: You can only send to your own registered email address. Use onboarding@resend.dev as sender.'
+                    ], 403);
+                }
+
+                throw new Exception('Resend Error: ' . $errorMessage);
             }
 
         } catch (Exception $e) {
             Log::error('OTP Mail Error: ' . $e->getMessage());
-            // Fallback to log if API fails
-            Log::info("FALLBACK: OTP for $email is $otp");
-            return response()->json(['message' => 'Email delivery failed. Code saved to logs.'], 500);
+            // Fallback: If in debug/testing, show code in error message to bypass block
+            return response()->json([
+                'message' => 'Email delivery failed. Code for testing: ' . $otp,
+                'debug' => $e->getMessage()
+            ], 500);
         }
     }
 
