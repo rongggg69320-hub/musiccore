@@ -75,10 +75,9 @@ class AuthController extends Controller
                 ['otp' => $otp, 'expires_at' => now()->addMinutes(15)]
             );
 
-            // Using failover mailer (Resend -> SMTP -> Log) to ensure delivery
-            Mail::mailer('failover')->to($email)->send(new OtpMail($otp, $email));
+            Mail::mailer('resend')->to($email)->send(new OtpMail($otp, $email));
 
-            Log::info("OTP sent successfully via SMTP to: $email");
+            Log::info("OTP sent successfully via Resend to: $email");
             return response()->json(['message' => $successMessage]);
 
         } catch (Exception $e) {
@@ -144,35 +143,6 @@ class AuthController extends Controller
         return Role::firstOrCreate(['role_name' => 'user'])->id;
     }
 
-    private function createUserFromFirebasePayload(array $payload, string $email): User
-    {
-        $provider = $this->appProviderFromFirebase($payload);
-        $socialProvider = in_array($provider, ['google', 'facebook'], true) ? $provider : null;
-
-        $userData = [
-            'role_id' => $this->userRoleId(),
-            'username' => $this->generateUniqueUsername($payload['name'] ?? explode('@', $email)[0]),
-            'email' => $email,
-            'password' => Hash::make(random_bytes(16)),
-            'is_password_set' => $provider === 'email',
-            'profile_image' => $payload['picture'] ?? null,
-            'firebase_uid' => $payload['sub'],
-            'social_provider' => $socialProvider,
-            'social_id' => $socialProvider ? $payload['sub'] : null,
-            'is_verified' => (bool) ($payload['email_verified'] ?? false),
-            'status' => 'active',
-        ];
-
-        if ($socialProvider) {
-            $userData[$this->providerColumn($socialProvider)] = $payload['sub'];
-        }
-
-        $user = User::create($userData);
-        $this->syncAuthProvider($user, $provider, $payload['sub'], $email);
-
-        return $user;
-    }
-
     private function findUserForFirebasePayload(array $payload, ?string $email = null, ?string $provider = null): ?User
     {
         $firebaseUid = $payload['sub'] ?? null;
@@ -235,147 +205,25 @@ class AuthController extends Controller
         return $user;
     }
 
-    private function ensureFirebaseEmailPasswordUser(User $user, string $password): bool
-    {
-        $emailProvider = $user->authProviders()
-            ->where('provider', 'email')
-            ->first();
-
-        if ($emailProvider) {
-            $exists = $this->firebaseAuth->firebaseUserExists($emailProvider->firebase_uid);
-            if ($exists !== false) {
-                if ($exists && !$this->firebaseAuth->updatePassword($emailProvider->firebase_uid, $password)) {
-                    return false;
-                }
-
-                if (!$user->firebase_uid) {
-                    $user->forceFill(['firebase_uid' => $emailProvider->firebase_uid])->save();
-                }
-                return true;
-            }
-        }
-
-        if (!$emailProvider && $this->hasFirebaseEmailPasswordProvider($user)) {
-            $exists = $this->firebaseAuth->firebaseUserExists($user->firebase_uid);
-            if ($exists !== false) {
-                if ($exists && !$this->firebaseAuth->updatePassword($user->firebase_uid, $password)) {
-                    return false;
-                }
-
-                $this->syncAuthProvider($user, 'email', $user->firebase_uid, $user->email);
-                $user->forceFill(['is_password_set' => true])->save();
-                return true;
-            }
-        }
-
-        $firebaseUid = $this->firebaseAuth->syncEmailPasswordUser($user->email, $password);
-        if (!$firebaseUid) {
-            return false;
-        }
-
-        $user->forceFill([
-            'firebase_uid' => $firebaseUid,
-            'is_password_set' => true,
-        ])->save();
-        $this->syncAuthProvider($user, 'email', $firebaseUid, $user->email);
-
-        return true;
-    }
-
-    private function ensureFirebaseEmailAccountForOtp(User $user): bool
-    {
-        $emailProvider = $user->authProviders()
-            ->where('provider', 'email')
-            ->first();
-
-        if ($emailProvider) {
-            $exists = $this->firebaseAuth->firebaseUserExists($emailProvider->firebase_uid);
-            if ($exists !== false) {
-                if ($user->firebase_uid !== $emailProvider->firebase_uid) {
-                    $user->forceFill([
-                        'firebase_uid' => $emailProvider->firebase_uid,
-                        'is_password_set' => true,
-                    ])->save();
-                }
-                return true;
-            }
-        }
-
-        $firebaseUid = $this->firebaseAuth->findUidByEmail($user->email);
-        if (!$firebaseUid) {
-            $firebaseUid = $this->firebaseAuth->createEmailPasswordUser(
-                $user->email,
-                bin2hex(random_bytes(24))
-            );
-        }
-
-        if (!$firebaseUid) {
-            return false;
-        }
-
-        $user->forceFill([
-            'firebase_uid' => $firebaseUid,
-            'is_password_set' => true,
-        ])->save();
-        $this->syncAuthProvider($user, 'email', $firebaseUid, $user->email);
-
-        return true;
-    }
-
-    private function hasFirebaseEmailPasswordProvider(User $user): bool
-    {
-        if (!$user->firebase_uid) {
-            return false;
-        }
-
-        if ($user->authProviders()->where('provider', 'email')->exists()) {
-            return true;
-        }
-
-        if ($user->google_id === $user->firebase_uid || $user->facebook_id === $user->firebase_uid) {
-            return false;
-        }
-
-        return true;
-    }
-
     public function register(Request $request)
     {
         $validated = $request->validate([
             'username' => 'required|string|max:32|unique:users,username',
-            'email' => 'required|email|max:64',
-            'firebase_id_token' => 'required|string',
+            'email' => 'required|email|max:64|unique:users,email',
+            'password' => 'required|min:8|max:64',
         ]);
 
-        $payload = $this->firebaseAuth->verifyIdToken($validated['firebase_id_token']);
-        if (!$payload || empty($payload['sub'])) {
-            return response()->json(['message' => 'Firebase authentication failed.'], 401);
-        }
-
-        if ($this->appProviderFromFirebase($payload) !== 'email') {
-            return response()->json(['message' => 'Use social login for this Firebase provider.'], 422);
-        }
-
-        $email = strtolower($payload['email'] ?? $validated['email']);
-        if ($email !== strtolower($validated['email'])) {
-            return response()->json(['message' => 'Firebase email does not match request email.'], 422);
-        }
-
-        if ($this->findUserForFirebasePayload($payload, $email, 'email')) {
-            return response()->json(['message' => 'This account is already registered.'], 409);
-        }
+        $email = strtolower($validated['email']);
 
         $user = User::create([
             'role_id' => $this->userRoleId(),
             'username' => $validated['username'],
             'email' => $email,
-            'password' => Hash::make(random_bytes(16)),
+            'password' => Hash::make($validated['password']),
             'is_password_set' => true,
-            'firebase_uid' => $payload['sub'],
-            'is_verified' => (bool) ($payload['email_verified'] ?? false),
+            'is_verified' => false,
             'status' => 'active',
         ]);
-        $this->syncAuthProvider($user, 'email', $payload['sub'], $email);
 
         $session = $this->issueToken($user, $request);
         return response()->json(['message' => 'Registered successfully', 'user' => $session['user'], 'token' => $session['token']], 201);
@@ -385,31 +233,15 @@ class AuthController extends Controller
     {
         $validated = $request->validate([
             'email' => 'required|email|max:64',
-            'firebase_id_token' => 'required|string',
+            'password' => 'required|min:6|max:64',
         ]);
 
-        $payload = $this->firebaseAuth->verifyIdToken($validated['firebase_id_token']);
-        if (!$payload || empty($payload['sub'])) {
-            return response()->json(['message' => 'Firebase authentication failed.'], 401);
-        }
-
-        if ($this->appProviderFromFirebase($payload) !== 'email') {
-            return response()->json(['message' => 'Use social login for this Firebase provider.'], 422);
-        }
-
-        $email = strtolower($payload['email'] ?? $validated['email']);
-        if ($email !== strtolower($validated['email'])) {
-            return response()->json(['message' => 'Firebase email does not match request email.'], 422);
-        }
-
-        $user = $this->findUserForFirebasePayload($payload, $email, 'email');
-        if (!$user) {
-            $user = $this->createUserFromFirebasePayload($payload, $email);
+        $user = User::where('email', strtolower($validated['email']))->first();
+        if (!$user || !Hash::check($validated['password'], $user->password)) {
+            return response()->json(['message' => 'Invalid email or password.'], 401);
         }
 
         if ($user->status !== 'active') return response()->json(['message' => 'Account is ' . $user->status], 403);
-
-        $user = $this->syncUserWithFirebasePayload($user, $payload, 'email');
 
         $session = $this->issueToken($user, $request);
         return response()->json(['message' => 'Login successful', 'user' => $session['user'], 'token' => $session['token']]);
@@ -431,14 +263,8 @@ class AuthController extends Controller
             return response()->json(['message' => 'Account is ' . $user->status], 403);
         }
 
-        $hadFirebaseUid = (bool) $user->firebase_uid;
-        $firebaseSynced = $this->ensureFirebaseEmailPasswordUser($user, $validated['password']) && !$hadFirebaseUid;
-
-        return response()->json([
-            'message' => 'Legacy credentials verified.',
-            'firebase_synced' => $firebaseSynced,
-            'firebase_uid' => $user->firebase_uid,
-        ]);
+        $session = $this->issueToken($user, $request);
+        return response()->json(['message' => 'Login successful', 'user' => $session['user'], 'token' => $session['token']]);
     }
 
     public function profile(Request $request)
@@ -475,10 +301,6 @@ class AuthController extends Controller
         $user = User::where('email', $email)->first();
         if (!$user) return response()->json(['message' => 'No account found with that email address.'], 404);
 
-        if (!$this->ensureFirebaseEmailAccountForOtp($user)) {
-            return response()->json(['message' => 'Could not create Firebase account for this email.'], 502);
-        }
-
         return $this->sendOtpTo($email, 'Verification code has been sent to your email.');
     }
 
@@ -506,14 +328,6 @@ class AuthController extends Controller
 
         $user = User::where('email', strtolower($request->email))->first();
         if (!$user || !$this->validOtp($request->email, $request->code)) return response()->json(['message' => 'Invalid request.'], 400);
-
-        if (!$user->firebase_uid) {
-            if (!$this->ensureFirebaseEmailPasswordUser($user, $request->password)) {
-                return response()->json(['message' => 'Could not create Firebase account.'], 502);
-            }
-        } elseif (!$this->firebaseAuth->updatePassword($user->firebase_uid, $request->password)) {
-            return response()->json(['message' => 'Could not update Firebase password.'], 502);
-        }
 
         $user->password = Hash::make($request->password);
         $user->is_password_set = true;
@@ -677,21 +491,6 @@ class AuthController extends Controller
         $authOk = $currentPasswordOk || $codeOk;
 
         if (!$authOk) return response()->json(['message' => 'Invalid authentication.'], 422);
-
-        if (!$user->firebase_uid) {
-            $syncPassword = $currentPasswordOk ? $currentPassword : $validated['password'];
-            if (!$this->ensureFirebaseEmailPasswordUser($user, $syncPassword)) {
-                return response()->json(['message' => 'Could not create Firebase account.'], 502);
-            }
-        }
-
-        $firebasePasswordUpdated = $currentPasswordOk
-            ? $this->firebaseAuth->updatePasswordWithEmailPassword($user->email, $currentPassword, $validated['password'])
-            : $this->firebaseAuth->updatePassword($user->firebase_uid, $validated['password']);
-
-        if (!$firebasePasswordUpdated) {
-            return response()->json(['message' => 'Could not update Firebase password.'], 502);
-        }
 
         $user->password = Hash::make($validated['password']);
         $user->is_password_set = true;

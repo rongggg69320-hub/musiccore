@@ -1,214 +1,65 @@
 <?php
 
-use App\Models\User;
-use App\Models\Otp;
-use App\Services\FirebaseAuthService;
 use App\Mail\OtpMail;
+use App\Models\Otp;
+use App\Models\User;
+use App\Services\FirebaseAuthService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Mail;
 use Laravel\Sanctum\Sanctum;
 
 uses(RefreshDatabase::class);
 
-test('login creates a backend user when firebase account has no local row', function () {
-    $this->mock(FirebaseAuthService::class, function ($mock) {
-        $mock->shouldReceive('verifyIdToken')
-            ->once()
-            ->with('valid-firebase-token')
-            ->andReturn([
-                'sub' => 'firebase-uid-123',
-                'email' => 'newuser@example.com',
-                'email_verified' => true,
-                'name' => 'New User',
-                'firebase' => [
-                    'sign_in_provider' => 'password',
-                ],
-            ]);
-    });
-
-    $response = $this->postJson('/api/login', [
+test('register creates a backend password user without firebase email auth', function () {
+    $response = $this->postJson('/api/register', [
+        'username' => 'newuser',
         'email' => 'newuser@example.com',
-        'firebase_id_token' => 'valid-firebase-token',
+        'password' => 'secret123',
     ]);
 
     $response
-        ->assertOk()
+        ->assertCreated()
         ->assertJsonPath('user.email', 'newuser@example.com')
-        ->assertJsonPath('user.firebase_uid', 'firebase-uid-123')
+        ->assertJsonPath('user.firebase_uid', null)
         ->assertJsonStructure(['token']);
+
+    $user = User::where('email', 'newuser@example.com')->first();
+
+    expect($user)->not->toBeNull()
+        ->and(password_verify('secret123', $user->password))->toBeTrue();
 
     $this->assertDatabaseHas('roles', ['role_name' => 'user']);
     $this->assertDatabaseHas('users', [
         'email' => 'newuser@example.com',
-        'firebase_uid' => 'firebase-uid-123',
         'username' => 'newuser',
+        'firebase_uid' => null,
         'is_password_set' => true,
     ]);
 });
 
-test('login links existing backend user to firebase uid', function () {
+test('login verifies backend email and password directly', function () {
     $role = \App\Models\Role::firstOrCreate(['role_name' => 'user']);
 
     User::create([
         'role_id' => $role->id,
         'username' => 'existing',
         'email' => 'existing@example.com',
-        'password' => bcrypt('password'),
+        'password' => bcrypt('secret123'),
         'status' => 'active',
     ]);
 
-    $this->mock(FirebaseAuthService::class, function ($mock) {
-        $mock->shouldReceive('verifyIdToken')
-            ->once()
-            ->with('valid-firebase-token')
-            ->andReturn([
-                'sub' => 'firebase-existing-uid',
-                'email' => 'existing@example.com',
-                'email_verified' => true,
-                'firebase' => [
-                    'sign_in_provider' => 'password',
-                ],
-            ]);
-    });
-
     $response = $this->postJson('/api/login', [
         'email' => 'existing@example.com',
-        'firebase_id_token' => 'valid-firebase-token',
+        'password' => 'secret123',
     ]);
 
     $response
         ->assertOk()
         ->assertJsonPath('user.email', 'existing@example.com')
-        ->assertJsonPath('user.firebase_uid', 'firebase-existing-uid');
-
-    $this->assertDatabaseCount('users', 1);
+        ->assertJsonStructure(['token']);
 });
 
-test('social login links provider to existing email user without replacing email firebase uid', function () {
-    $role = \App\Models\Role::firstOrCreate(['role_name' => 'user']);
-
-    User::create([
-        'role_id' => $role->id,
-        'username' => 'multiprovider',
-        'email' => 'multi@example.com',
-        'password' => bcrypt('password'),
-        'is_password_set' => true,
-        'firebase_uid' => 'firebase-email-uid',
-        'status' => 'active',
-    ]);
-
-    $this->mock(FirebaseAuthService::class, function ($mock) {
-        $mock->shouldReceive('verifyIdToken')
-            ->once()
-            ->with('valid-google-token')
-            ->andReturn([
-                'sub' => 'firebase-google-uid',
-                'email' => 'multi@example.com',
-                'email_verified' => true,
-                'name' => 'Multi Provider',
-                'firebase' => [
-                    'sign_in_provider' => 'google.com',
-                ],
-            ]);
-    });
-
-    $response = $this->postJson('/api/social-login', [
-        'provider' => 'google',
-        'provider_token' => 'valid-google-token',
-    ]);
-
-    $response
-        ->assertOk()
-        ->assertJsonPath('user.email', 'multi@example.com')
-        ->assertJsonPath('user.firebase_uid', 'firebase-email-uid')
-        ->assertJsonPath('user.google_id', 'firebase-google-uid')
-        ->assertJsonPath('user.connected_providers', ['email', 'google']);
-
-    $this->assertDatabaseCount('users', 1);
-    $this->assertDatabaseHas('user_auth_providers', [
-        'provider' => 'google',
-        'firebase_uid' => 'firebase-google-uid',
-        'email' => 'multi@example.com',
-    ]);
-});
-
-test('legacy verification syncs backend password account to firebase when uid is missing', function () {
-    $role = \App\Models\Role::firstOrCreate(['role_name' => 'user']);
-
-    User::create([
-        'role_id' => $role->id,
-        'username' => 'legacy',
-        'email' => 'legacy@example.com',
-        'password' => bcrypt('secret123'),
-        'is_password_set' => true,
-        'status' => 'active',
-    ]);
-
-    $this->mock(FirebaseAuthService::class, function ($mock) {
-        $mock->shouldReceive('syncEmailPasswordUser')
-            ->once()
-            ->with('legacy@example.com', 'secret123')
-            ->andReturn('firebase-legacy-uid');
-    });
-
-    $response = $this->postJson('/api/login/legacy-verify', [
-        'email' => 'legacy@example.com',
-        'password' => 'secret123',
-    ]);
-
-    $response
-        ->assertOk()
-        ->assertJsonPath('firebase_synced', true)
-        ->assertJsonPath('firebase_uid', 'firebase-legacy-uid');
-
-    $this->assertDatabaseHas('users', [
-        'email' => 'legacy@example.com',
-        'firebase_uid' => 'firebase-legacy-uid',
-    ]);
-});
-
-test('legacy verification repairs existing firebase password after database password is verified', function () {
-    $role = \App\Models\Role::firstOrCreate(['role_name' => 'user']);
-
-    $user = User::create([
-        'role_id' => $role->id,
-        'username' => 'repairfire',
-        'email' => 'repair@example.com',
-        'password' => bcrypt('secret123'),
-        'firebase_uid' => 'firebase-repair-uid',
-        'is_password_set' => true,
-        'status' => 'active',
-    ]);
-
-    $user->authProviders()->create([
-        'provider' => 'email',
-        'firebase_uid' => 'firebase-repair-uid',
-        'email' => 'repair@example.com',
-    ]);
-
-    $this->mock(FirebaseAuthService::class, function ($mock) {
-        $mock->shouldReceive('firebaseUserExists')
-            ->once()
-            ->with('firebase-repair-uid')
-            ->andReturn(true);
-        $mock->shouldReceive('updatePassword')
-            ->once()
-            ->with('firebase-repair-uid', 'secret123')
-            ->andReturn(true);
-        $mock->shouldNotReceive('syncEmailPasswordUser');
-    });
-
-    $response = $this->postJson('/api/login/legacy-verify', [
-        'email' => 'repair@example.com',
-        'password' => 'secret123',
-    ]);
-
-    $response
-        ->assertOk()
-        ->assertJsonPath('firebase_uid', 'firebase-repair-uid');
-});
-
-test('legacy verification does not sync firebase when database password is invalid', function () {
+test('login rejects invalid backend password', function () {
     $role = \App\Models\Role::firstOrCreate(['role_name' => 'user']);
 
     User::create([
@@ -219,65 +70,46 @@ test('legacy verification does not sync firebase when database password is inval
         'status' => 'active',
     ]);
 
-    $this->mock(FirebaseAuthService::class, function ($mock) {
-        $mock->shouldNotReceive('syncEmailPasswordUser');
-    });
-
-    $this->postJson('/api/login/legacy-verify', [
+    $this->postJson('/api/login', [
         'email' => 'wrongpass@example.com',
         'password' => 'badpass123',
     ])->assertUnauthorized();
-
-    $this->assertDatabaseHas('users', [
-        'email' => 'wrongpass@example.com',
-        'firebase_uid' => null,
-    ]);
 });
 
-test('forgot password creates missing firebase email account before sending otp', function () {
+test('forgot password sends otp without creating firebase email account', function () {
     Mail::fake();
     $role = \App\Models\Role::firstOrCreate(['role_name' => 'user']);
 
     User::create([
         'role_id' => $role->id,
-        'username' => 'otpfire',
-        'email' => 'otpfire@example.com',
+        'username' => 'otpuser',
+        'email' => 'otpuser@example.com',
         'password' => bcrypt('oldpass123'),
         'status' => 'active',
     ]);
 
     $this->mock(FirebaseAuthService::class, function ($mock) {
-        $mock->shouldReceive('findUidByEmail')
-            ->once()
-            ->with('otpfire@example.com')
-            ->andReturn(null);
-        $mock->shouldReceive('createEmailPasswordUser')
-            ->once()
-            ->with('otpfire@example.com', \Mockery::type('string'))
-            ->andReturn('firebase-otp-uid');
+        $mock->shouldNotReceive('findUidByEmail');
+        $mock->shouldNotReceive('createEmailPasswordUser');
+        $mock->shouldNotReceive('syncEmailPasswordUser');
     });
 
     $response = $this->postJson('/api/forgot-password', [
-        'email' => 'otpfire@example.com',
+        'email' => 'otpuser@example.com',
     ]);
 
     $response->assertOk()->assertJsonPath('message', 'Verification code has been sent to your email.');
 
     $this->assertDatabaseHas('users', [
-        'email' => 'otpfire@example.com',
-        'firebase_uid' => 'firebase-otp-uid',
-        'is_password_set' => true,
+        'email' => 'otpuser@example.com',
+        'firebase_uid' => null,
     ]);
-    $this->assertDatabaseHas('user_auth_providers', [
-        'provider' => 'email',
-        'firebase_uid' => 'firebase-otp-uid',
-        'email' => 'otpfire@example.com',
-    ]);
-    $this->assertDatabaseHas('otps', ['email' => 'otpfire@example.com']);
+    $this->assertDatabaseMissing('user_auth_providers', ['email' => 'otpuser@example.com']);
+    $this->assertDatabaseHas('otps', ['email' => 'otpuser@example.com']);
     Mail::assertSent(OtpMail::class);
 });
 
-test('reset password creates firebase account when backend user has no firebase uid', function () {
+test('reset password updates only backend password', function () {
     $role = \App\Models\Role::firstOrCreate(['role_name' => 'user']);
 
     User::create([
@@ -285,6 +117,7 @@ test('reset password creates firebase account when backend user has no firebase 
         'username' => 'resetuser',
         'email' => 'reset@example.com',
         'password' => bcrypt('oldpass123'),
+        'firebase_uid' => 'social-or-old-firebase-uid',
         'status' => 'active',
     ]);
 
@@ -295,10 +128,7 @@ test('reset password creates firebase account when backend user has no firebase 
     ]);
 
     $this->mock(FirebaseAuthService::class, function ($mock) {
-        $mock->shouldReceive('syncEmailPasswordUser')
-            ->once()
-            ->with('reset@example.com', 'newpass123')
-            ->andReturn('firebase-reset-uid');
+        $mock->shouldNotReceive('syncEmailPasswordUser');
         $mock->shouldNotReceive('updatePassword');
     });
 
@@ -311,15 +141,13 @@ test('reset password creates firebase account when backend user has no firebase 
 
     $response->assertOk()->assertJsonPath('message', 'Password reset.');
 
-    $this->assertDatabaseHas('users', [
-        'email' => 'reset@example.com',
-        'firebase_uid' => 'firebase-reset-uid',
-        'is_password_set' => true,
-    ]);
+    $user = User::where('email', 'reset@example.com')->first();
+    expect(password_verify('newpass123', $user->password))->toBeTrue();
+
     $this->assertDatabaseMissing('otps', ['email' => 'reset@example.com']);
 });
 
-test('change password syncs missing firebase account before updating firebase password', function () {
+test('change password updates only backend password', function () {
     $role = \App\Models\Role::firstOrCreate(['role_name' => 'user']);
 
     $user = User::create([
@@ -333,14 +161,8 @@ test('change password syncs missing firebase account before updating firebase pa
     Sanctum::actingAs($user);
 
     $this->mock(FirebaseAuthService::class, function ($mock) {
-        $mock->shouldReceive('syncEmailPasswordUser')
-            ->once()
-            ->with('change@example.com', 'oldpass123')
-            ->andReturn('firebase-change-uid');
-        $mock->shouldReceive('updatePasswordWithEmailPassword')
-            ->once()
-            ->with('change@example.com', 'oldpass123', 'newpass123')
-            ->andReturn(true);
+        $mock->shouldNotReceive('syncEmailPasswordUser');
+        $mock->shouldNotReceive('updatePasswordWithEmailPassword');
         $mock->shouldNotReceive('updatePassword');
     });
 
@@ -352,41 +174,51 @@ test('change password syncs missing firebase account before updating firebase pa
 
     $response->assertOk()->assertJsonPath('message', 'Password changed.');
 
-    $this->assertDatabaseHas('users', [
-        'email' => 'change@example.com',
-        'firebase_uid' => 'firebase-change-uid',
-        'is_password_set' => true,
-    ]);
+    $user->refresh();
+    expect(password_verify('newpass123', $user->password))->toBeTrue();
 });
 
-test('change password with current password updates existing firebase account using web api credentials', function () {
+test('social login still links firebase provider to existing backend user', function () {
     $role = \App\Models\Role::firstOrCreate(['role_name' => 'user']);
 
-    $user = User::create([
+    User::create([
         'role_id' => $role->id,
-        'username' => 'existingfire',
-        'email' => 'existingfire@example.com',
-        'password' => bcrypt('oldpass123'),
-        'firebase_uid' => 'firebase-existing-uid',
+        'username' => 'socialuser',
+        'email' => 'social@example.com',
+        'password' => bcrypt('password'),
+        'is_password_set' => true,
         'status' => 'active',
     ]);
 
-    Sanctum::actingAs($user);
-
     $this->mock(FirebaseAuthService::class, function ($mock) {
-        $mock->shouldReceive('updatePasswordWithEmailPassword')
+        $mock->shouldReceive('verifyIdToken')
             ->once()
-            ->with('existingfire@example.com', 'oldpass123', 'newpass123')
-            ->andReturn(true);
-        $mock->shouldNotReceive('syncEmailPasswordUser');
-        $mock->shouldNotReceive('updatePassword');
+            ->with('valid-google-token')
+            ->andReturn([
+                'sub' => 'firebase-google-uid',
+                'email' => 'social@example.com',
+                'email_verified' => true,
+                'name' => 'Social User',
+                'firebase' => [
+                    'sign_in_provider' => 'google.com',
+                ],
+            ]);
     });
 
-    $response = $this->postJson('/api/user/change-password', [
-        'current_password' => 'oldpass123',
-        'password' => 'newpass123',
-        'password_confirmation' => 'newpass123',
+    $response = $this->postJson('/api/social-login', [
+        'provider' => 'google',
+        'provider_token' => 'valid-google-token',
     ]);
 
-    $response->assertOk()->assertJsonPath('message', 'Password changed.');
+    $response
+        ->assertOk()
+        ->assertJsonPath('user.email', 'social@example.com')
+        ->assertJsonPath('user.google_id', 'firebase-google-uid');
+
+    $this->assertDatabaseCount('users', 1);
+    $this->assertDatabaseHas('user_auth_providers', [
+        'provider' => 'google',
+        'firebase_uid' => 'firebase-google-uid',
+        'email' => 'social@example.com',
+    ]);
 });
