@@ -179,30 +179,29 @@ class AuthController extends Controller
         $provider ??= $this->appProviderFromFirebase($payload);
 
         if ($firebaseUid) {
-            $providerLink = UserAuthProvider::with('user')
-                ->where('provider', $provider)
+            // 1. Try finding by Firebase UID directly
+            $user = User::where('firebase_uid', $firebaseUid)->first();
+            if ($user) return $user;
+
+            // 2. Try finding via specific provider link table
+            $providerLink = UserAuthProvider::where('provider', $provider)
                 ->where('firebase_uid', $firebaseUid)
                 ->first();
+            if ($providerLink?->user) return $providerLink->user;
 
-            if ($providerLink?->user) {
-                return $providerLink->user;
+            // 3. Try finding via legacy social columns
+            if (in_array($provider, ['google', 'facebook'], true)) {
+                $user = User::where($this->providerColumn($provider), $firebaseUid)->first();
+                if ($user) return $user;
             }
         }
 
-        $query = User::query();
-        if ($firebaseUid) {
-            $query->where('firebase_uid', $firebaseUid);
-        }
-
-        if (in_array($provider, ['google', 'facebook'], true) && $firebaseUid) {
-            $query->orWhere($this->providerColumn($provider), $firebaseUid);
-        }
-
+        // 4. Fallback: Find by email to link existing accounts
         if ($email) {
-            $query->orWhere('email', strtolower($email));
+            return User::where('email', strtolower($email))->first();
         }
 
-        return $query->first();
+        return null;
     }
 
     private function syncUserWithFirebasePayload(User $user, array $payload, string $provider): User
