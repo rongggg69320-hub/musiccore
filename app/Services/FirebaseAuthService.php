@@ -88,6 +88,33 @@ class FirebaseAuthService
         }
     }
 
+    public function firebaseUserExists(string $firebaseUid): ?bool
+    {
+        try {
+            $projectId = config('services.firebase.project_id');
+            $accessToken = $this->accessToken();
+
+            if (!$projectId || !$accessToken) {
+                return null;
+            }
+
+            $response = Http::withToken($accessToken)->post(
+                "https://identitytoolkit.googleapis.com/v1/projects/{$projectId}/accounts:lookup",
+                ['localId' => [$firebaseUid]]
+            );
+
+            if ($response->successful()) {
+                return !empty($response->json('users'));
+            }
+
+            Log::error('Firebase user lookup failed: ' . $response->body());
+            return null;
+        } catch (Exception $e) {
+            Log::error('Firebase user lookup exception: ' . $e->getMessage());
+            return null;
+        }
+    }
+
     public function syncEmailPasswordUser(string $email, string $password): ?string
     {
         try {

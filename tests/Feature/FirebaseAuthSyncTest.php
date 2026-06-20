@@ -82,6 +82,54 @@ test('login links existing backend user to firebase uid', function () {
     $this->assertDatabaseCount('users', 1);
 });
 
+test('social login links provider to existing email user without replacing email firebase uid', function () {
+    $role = \App\Models\Role::firstOrCreate(['role_name' => 'user']);
+
+    User::create([
+        'role_id' => $role->id,
+        'username' => 'multiprovider',
+        'email' => 'multi@example.com',
+        'password' => bcrypt('password'),
+        'is_password_set' => true,
+        'firebase_uid' => 'firebase-email-uid',
+        'status' => 'active',
+    ]);
+
+    $this->mock(FirebaseAuthService::class, function ($mock) {
+        $mock->shouldReceive('verifyIdToken')
+            ->once()
+            ->with('valid-google-token')
+            ->andReturn([
+                'sub' => 'firebase-google-uid',
+                'email' => 'multi@example.com',
+                'email_verified' => true,
+                'name' => 'Multi Provider',
+                'firebase' => [
+                    'sign_in_provider' => 'google.com',
+                ],
+            ]);
+    });
+
+    $response = $this->postJson('/api/social-login', [
+        'provider' => 'google',
+        'provider_token' => 'valid-google-token',
+    ]);
+
+    $response
+        ->assertOk()
+        ->assertJsonPath('user.email', 'multi@example.com')
+        ->assertJsonPath('user.firebase_uid', 'firebase-email-uid')
+        ->assertJsonPath('user.google_id', 'firebase-google-uid')
+        ->assertJsonPath('user.connected_providers', ['email', 'google']);
+
+    $this->assertDatabaseCount('users', 1);
+    $this->assertDatabaseHas('user_auth_providers', [
+        'provider' => 'google',
+        'firebase_uid' => 'firebase-google-uid',
+        'email' => 'multi@example.com',
+    ]);
+});
+
 test('legacy verification syncs backend password account to firebase when uid is missing', function () {
     $role = \App\Models\Role::firstOrCreate(['role_name' => 'user']);
 

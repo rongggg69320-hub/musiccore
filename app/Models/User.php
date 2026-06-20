@@ -52,10 +52,17 @@ class User extends Authenticatable
 
     public function getConnectedProvidersAttribute()
     {
-        return collect([
+        $columns = collect([
+            'email' => $this->is_password_set,
             'google' => $this->google_id,
             'facebook' => $this->facebook_id,
-        ])->filter()->keys()->values()->all();
+        ])->filter()->keys();
+
+        if ($this->relationLoaded('authProviders')) {
+            $columns = $columns->merge($this->authProviders->pluck('provider'));
+        }
+
+        return $columns->unique()->values()->all();
     }
 
     public function getConnectedProviderAttribute()
@@ -102,5 +109,10 @@ class User extends Authenticatable
     public function albums()
     {
         return $this->hasMany(Album::class);
+    }
+
+    public function authProviders()
+    {
+        return $this->hasMany(UserAuthProvider::class);
     }
 }
