@@ -5,18 +5,20 @@ namespace App\Http\Controllers;
 use App\Models\User;
 use App\Models\Otp;
 use App\Mail\OtpMail;
+use App\Services\FirebaseAuthService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\Http;
-use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Storage;
-use Illuminate\Validation\ValidationException;
 use Exception;
 
 class AuthController extends Controller
 {
+    public function __construct(private FirebaseAuthService $firebaseAuth)
+    {
+    }
+
     /**
      * Issue a new Sanctum token and return user data
      */
@@ -93,20 +95,57 @@ class AuthController extends Controller
         }
     }
 
+    private function verifiedFirebasePayload(Request $request): ?array
+    {
+        $request->validate([
+            'firebase_id_token' => 'required_without:provider_token|string',
+            'provider_token' => 'required_without:firebase_id_token|string',
+        ]);
+
+        $token = $request->input('firebase_id_token') ?: $request->input('provider_token');
+        return $this->firebaseAuth->verifyIdToken($token);
+    }
+
+    private function firebaseProvider(array $payload): ?string
+    {
+        return $payload['firebase']['sign_in_provider'] ?? null;
+    }
+
+    private function providerColumn(string $provider): string
+    {
+        return $provider === 'google' ? 'google_id' : 'facebook_id';
+    }
+
     public function register(Request $request)
     {
         $validated = $request->validate([
             'username' => 'required|string|max:32|unique:users,username',
-            'email' => 'required|email|max:64|unique:users,email',
-            'password' => 'required|min:8|max:64|confirmed',
+            'email' => 'required|email|max:64',
+            'firebase_id_token' => 'required|string',
         ]);
+
+        $payload = $this->firebaseAuth->verifyIdToken($validated['firebase_id_token']);
+        if (!$payload || empty($payload['sub'])) {
+            return response()->json(['message' => 'Firebase authentication failed.'], 401);
+        }
+
+        $email = strtolower($payload['email'] ?? $validated['email']);
+        if ($email !== strtolower($validated['email'])) {
+            return response()->json(['message' => 'Firebase email does not match request email.'], 422);
+        }
+
+        if (User::where('email', $email)->orWhere('firebase_uid', $payload['sub'])->exists()) {
+            return response()->json(['message' => 'This account is already registered.'], 409);
+        }
 
         $user = User::create([
             'role_id' => 2,
             'username' => $validated['username'],
-            'email' => $validated['email'],
-            'password' => Hash::make($validated['password']),
+            'email' => $email,
+            'password' => Hash::make(random_bytes(16)),
             'is_password_set' => true,
+            'firebase_uid' => $payload['sub'],
+            'is_verified' => (bool) ($payload['email_verified'] ?? false),
             'status' => 'active',
         ]);
 
@@ -118,15 +157,29 @@ class AuthController extends Controller
     {
         $validated = $request->validate([
             'email' => 'required|email|max:64',
-            'password' => 'required|min:6|max:64',
+            'firebase_id_token' => 'required|string',
         ]);
 
-        $user = User::where('email', strtolower($validated['email']))->first();
-        if (!$user || !Hash::check($validated['password'], $user->password)) {
-            return response()->json(['message' => 'Invalid credentials.'], 401);
+        $payload = $this->firebaseAuth->verifyIdToken($validated['firebase_id_token']);
+        if (!$payload || empty($payload['sub'])) {
+            return response()->json(['message' => 'Firebase authentication failed.'], 401);
         }
 
+        $email = strtolower($payload['email'] ?? $validated['email']);
+        if ($email !== strtolower($validated['email'])) {
+            return response()->json(['message' => 'Firebase email does not match request email.'], 422);
+        }
+
+        $user = User::where('firebase_uid', $payload['sub'])->orWhere('email', $email)->first();
+        if (!$user) return response()->json(['message' => 'No backend account found for this Firebase user.'], 404);
+
         if ($user->status !== 'active') return response()->json(['message' => 'Account is ' . $user->status], 403);
+
+        if (!$user->firebase_uid) {
+            $user->firebase_uid = $payload['sub'];
+        }
+        $user->is_verified = (bool) ($payload['email_verified'] ?? $user->is_verified);
+        $user->save();
 
         $session = $this->issueToken($user, $request);
         return response()->json(['message' => 'Login successful', 'user' => $session['user'], 'token' => $session['token']]);
@@ -185,8 +238,22 @@ class AuthController extends Controller
 
     public function resetPassword(Request $request)
     {
+        $request->validate([
+            'email' => 'required|email',
+            'code' => 'required|string',
+            'password' => 'required|min:8|confirmed',
+        ]);
+
         $user = User::where('email', strtolower($request->email))->first();
         if (!$user || !$this->validOtp($request->email, $request->code)) return response()->json(['message' => 'Invalid request.'], 400);
+
+        if (!$user->firebase_uid) {
+            return response()->json(['message' => 'This account is not linked to Firebase. Please contact support.'], 409);
+        }
+
+        if (!$this->firebaseAuth->updatePassword($user->firebase_uid, $request->password)) {
+            return response()->json(['message' => 'Could not update Firebase password.'], 502);
+        }
 
         $user->password = Hash::make($request->password);
         $user->is_password_set = true;
@@ -232,15 +299,15 @@ class AuthController extends Controller
 
     public function socialLogin(Request $request)
     {
-        $request->validate(['provider' => 'required|in:google,facebook', 'provider_token' => 'required']);
-        $profile = $this->verifySocialToken($request->provider, $request->provider_token);
+        $request->validate(['provider' => 'required|in:google,facebook', 'provider_token' => 'required|string']);
+        $profile = $this->firebaseProfile($request);
 
         if (!$profile) return response()->json(['message' => 'Verification failed.'], 401);
 
         $email = $profile['email'] ? strtolower($profile['email']) : null;
-        $column = $request->provider === 'google' ? 'google_id' : 'facebook_id';
+        $column = $this->providerColumn($request->provider);
 
-        $user = User::where($column, $profile['id']);
+        $user = User::where('firebase_uid', $profile['id'])->orWhere($column, $profile['id']);
         if ($email) {
             $user->orWhere('email', $email);
         }
@@ -248,7 +315,11 @@ class AuthController extends Controller
 
         if ($user) {
             if ($user->status !== 'active') return response()->json(['message' => 'Forbidden'], 403);
+            $user->firebase_uid = $profile['id'];
             $user->$column = $profile['id'];
+            $user->social_provider = $request->provider;
+            $user->social_id = $profile['id'];
+            $user->is_verified = $profile['email_verified'];
             if (!$user->profile_image && ($profile['picture'] ?? null)) {
                 $user->profile_image = $profile['picture'];
             }
@@ -261,9 +332,11 @@ class AuthController extends Controller
                 'password' => Hash::make(random_bytes(16)),
                 'is_password_set' => false,
                 'profile_image' => $profile['picture'] ?? null,
+                'firebase_uid' => $profile['id'],
                 $column => $profile['id'],
                 'social_provider' => $request->provider,
                 'social_id' => $profile['id'],
+                'is_verified' => $profile['email_verified'],
                 'status' => 'active',
             ]);
         }
@@ -350,6 +423,10 @@ class AuthController extends Controller
 
         if (!$authOk) return response()->json(['message' => 'Invalid authentication.'], 422);
 
+        if ($user->firebase_uid && !$this->firebaseAuth->updatePassword($user->firebase_uid, $validated['password'])) {
+            return response()->json(['message' => 'Could not update Firebase password.'], 502);
+        }
+
         $user->password = Hash::make($validated['password']);
         $user->is_password_set = true;
         $user->save();
@@ -362,17 +439,24 @@ class AuthController extends Controller
     public function connectSocialAccount(Request $request)
     {
         $user = $request->user();
-        $request->validate(['provider' => 'required|in:google,facebook', 'provider_token' => 'required']);
+        $request->validate(['provider' => 'required|in:google,facebook', 'provider_token' => 'required|string']);
 
-        $profile = $this->verifySocialToken($request->provider, $request->provider_token);
+        $profile = $this->firebaseProfile($request);
         if (!$profile) return response()->json(['message' => 'Verification failed.'], 401);
 
-        $column = $request->provider === 'google' ? 'google_id' : 'facebook_id';
+        $column = $this->providerColumn($request->provider);
         if (User::where($column, $profile['id'])->where('id', '!=', $user->id)->exists()) {
             return response()->json(['message' => 'Already connected to another account.'], 409);
         }
 
+        if (User::where('firebase_uid', $profile['id'])->where('id', '!=', $user->id)->exists()) {
+            return response()->json(['message' => 'Firebase account is already connected to another user.'], 409);
+        }
+
+        $user->firebase_uid = $profile['id'];
         $user->$column = $profile['id'];
+        $user->social_provider = $request->provider;
+        $user->social_id = $profile['id'];
         $user->save();
 
         return response()->json(['message' => 'Connected.', 'user' => $user]);
@@ -390,38 +474,24 @@ class AuthController extends Controller
         return response()->json(['message' => 'Disconnected.', 'user' => $user]);
     }
 
-    private function verifySocialToken(string $provider, string $token): ?array
+    private function firebaseProfile(Request $request): ?array
     {
-        try {
-            if ($provider === 'google') {
-                $response = Http::get("https://oauth2.googleapis.com/tokeninfo", ['id_token' => $token]);
-                if ($response->successful()) {
-                    $data = $response->json();
-                    return [
-                        'id' => $data['sub'],
-                        'email' => $data['email'] ?? null,
-                        'name' => $data['name'] ?? null,
-                        'picture' => $data['picture'] ?? null,
-                    ];
-                }
-            } elseif ($provider === 'facebook') {
-                $response = Http::get("https://graph.facebook.com/me", [
-                    'fields' => 'id,name,email,picture.type(large)',
-                    'access_token' => $token
-                ]);
-                if ($response->successful()) {
-                    $data = $response->json();
-                    return [
-                        'id' => $data['id'],
-                        'email' => $data['email'] ?? null,
-                        'name' => $data['name'] ?? null,
-                        'picture' => $data['picture']['data']['url'] ?? null,
-                    ];
-                }
-            }
-        } catch (Exception $e) {
-            Log::error("Social Verification Error ({$provider}): " . $e->getMessage());
+        $payload = $this->verifiedFirebasePayload($request);
+        if (!$payload || empty($payload['sub'])) {
+            return null;
         }
-        return null;
+
+        $expectedProvider = $request->provider === 'google' ? 'google.com' : 'facebook.com';
+        if ($this->firebaseProvider($payload) !== $expectedProvider) {
+            return null;
+        }
+
+        return [
+            'id' => $payload['sub'],
+            'email' => $payload['email'] ?? null,
+            'name' => $payload['name'] ?? null,
+            'picture' => $payload['picture'] ?? null,
+            'email_verified' => (bool) ($payload['email_verified'] ?? false),
+        ];
     }
 }

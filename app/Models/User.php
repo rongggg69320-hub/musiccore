@@ -23,6 +23,7 @@ class User extends Authenticatable
         'social_id',
         'google_id',
         'facebook_id',
+        'firebase_uid',
         'is_verified',
         'last_login',
         'status',
