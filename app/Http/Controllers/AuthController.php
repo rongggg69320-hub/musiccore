@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\User;
+use App\Models\UserAuthProvider;
 use App\Models\Otp;
 use App\Models\Role;
 use App\Mail\OtpMail;
@@ -124,6 +125,18 @@ class AuthController extends Controller
     private function providerColumn(string $provider): string
     {
         return $provider === 'google' ? 'google_id' : 'facebook_id';
+    }
+
+    private function syncAuthProvider(User $user, string $provider, string $firebaseUid, ?string $email = null): void
+    {
+        UserAuthProvider::updateOrCreate(
+            ['user_id' => $user->id, 'provider' => $provider],
+            [
+                'firebase_uid' => $firebaseUid,
+                'email' => $email ? strtolower($email) : $user->email,
+                'last_used_at' => now(),
+            ]
+        );
     }
 
     private function userRoleId(): int
