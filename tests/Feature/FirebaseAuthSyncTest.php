@@ -3,7 +3,9 @@
 use App\Models\User;
 use App\Models\Otp;
 use App\Services\FirebaseAuthService;
+use App\Mail\OtpMail;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Mail;
 use Laravel\Sanctum\Sanctum;
 
 uses(RefreshDatabase::class);
@@ -189,6 +191,49 @@ test('legacy verification does not sync firebase when database password is inval
         'email' => 'wrongpass@example.com',
         'firebase_uid' => null,
     ]);
+});
+
+test('forgot password creates missing firebase email account before sending otp', function () {
+    Mail::fake();
+    $role = \App\Models\Role::firstOrCreate(['role_name' => 'user']);
+
+    User::create([
+        'role_id' => $role->id,
+        'username' => 'otpfire',
+        'email' => 'otpfire@example.com',
+        'password' => bcrypt('oldpass123'),
+        'status' => 'active',
+    ]);
+
+    $this->mock(FirebaseAuthService::class, function ($mock) {
+        $mock->shouldReceive('findUidByEmail')
+            ->once()
+            ->with('otpfire@example.com')
+            ->andReturn(null);
+        $mock->shouldReceive('createEmailPasswordUser')
+            ->once()
+            ->with('otpfire@example.com', \Mockery::type('string'))
+            ->andReturn('firebase-otp-uid');
+    });
+
+    $response = $this->postJson('/api/forgot-password', [
+        'email' => 'otpfire@example.com',
+    ]);
+
+    $response->assertOk()->assertJsonPath('message', 'Verification code has been sent to your email.');
+
+    $this->assertDatabaseHas('users', [
+        'email' => 'otpfire@example.com',
+        'firebase_uid' => 'firebase-otp-uid',
+        'is_password_set' => true,
+    ]);
+    $this->assertDatabaseHas('user_auth_providers', [
+        'provider' => 'email',
+        'firebase_uid' => 'firebase-otp-uid',
+        'email' => 'otpfire@example.com',
+    ]);
+    $this->assertDatabaseHas('otps', ['email' => 'otpfire@example.com']);
+    Mail::assertSent(OtpMail::class);
 });
 
 test('reset password creates firebase account when backend user has no firebase uid', function () {

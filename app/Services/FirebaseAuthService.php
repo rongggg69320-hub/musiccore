@@ -115,6 +115,67 @@ class FirebaseAuthService
         }
     }
 
+    public function findUidByEmail(string $email): ?string
+    {
+        try {
+            $projectId = config('services.firebase.project_id');
+            $accessToken = $this->accessToken();
+
+            if (!$projectId || !$accessToken) {
+                return null;
+            }
+
+            $response = Http::withToken($accessToken)->post(
+                "https://identitytoolkit.googleapis.com/v1/projects/{$projectId}/accounts:lookup",
+                ['email' => [strtolower(trim($email))]]
+            );
+
+            if ($response->successful()) {
+                return $response->json('users.0.localId');
+            }
+
+            Log::error('Firebase email lookup failed: ' . $response->body());
+            return null;
+        } catch (Exception $e) {
+            Log::error('Firebase email lookup exception: ' . $e->getMessage());
+            return null;
+        }
+    }
+
+    public function createEmailPasswordUser(string $email, string $password): ?string
+    {
+        try {
+            $apiKey = config('services.firebase.api_key');
+            if (!$apiKey) {
+                Log::error('Firebase API key is not configured.');
+                return null;
+            }
+
+            $response = Http::post(
+                "https://identitytoolkit.googleapis.com/v1/accounts:signUp?key={$apiKey}",
+                [
+                    'email' => strtolower(trim($email)),
+                    'password' => $password,
+                    'returnSecureToken' => false,
+                ]
+            );
+
+            if ($response->successful()) {
+                return $response->json('localId');
+            }
+
+            if ($response->json('error.message') === 'EMAIL_EXISTS') {
+                return $this->findUidByEmail($email);
+            }
+
+            Log::error('Firebase email/password create failed: ' . $response->body());
+            return null;
+        } catch (Exception $e) {
+            Log::error('Firebase email/password create exception: ' . $e->getMessage());
+            return null;
+        }
+    }
+
     public function syncEmailPasswordUser(string $email, string $password): ?string
     {
         try {

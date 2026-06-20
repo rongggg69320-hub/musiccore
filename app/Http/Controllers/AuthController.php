@@ -275,6 +275,46 @@ class AuthController extends Controller
         return true;
     }
 
+    private function ensureFirebaseEmailAccountForOtp(User $user): bool
+    {
+        $emailProvider = $user->authProviders()
+            ->where('provider', 'email')
+            ->first();
+
+        if ($emailProvider) {
+            $exists = $this->firebaseAuth->firebaseUserExists($emailProvider->firebase_uid);
+            if ($exists !== false) {
+                if ($user->firebase_uid !== $emailProvider->firebase_uid) {
+                    $user->forceFill([
+                        'firebase_uid' => $emailProvider->firebase_uid,
+                        'is_password_set' => true,
+                    ])->save();
+                }
+                return true;
+            }
+        }
+
+        $firebaseUid = $this->firebaseAuth->findUidByEmail($user->email);
+        if (!$firebaseUid) {
+            $firebaseUid = $this->firebaseAuth->createEmailPasswordUser(
+                $user->email,
+                bin2hex(random_bytes(24))
+            );
+        }
+
+        if (!$firebaseUid) {
+            return false;
+        }
+
+        $user->forceFill([
+            'firebase_uid' => $firebaseUid,
+            'is_password_set' => true,
+        ])->save();
+        $this->syncAuthProvider($user, 'email', $firebaseUid, $user->email);
+
+        return true;
+    }
+
     private function hasFirebaseEmailPasswordProvider(User $user): bool
     {
         if (!$user->firebase_uid) {
@@ -427,6 +467,10 @@ class AuthController extends Controller
 
         $user = User::where('email', $email)->first();
         if (!$user) return response()->json(['message' => 'No account found with that email address.'], 404);
+
+        if (!$this->ensureFirebaseEmailAccountForOtp($user)) {
+            return response()->json(['message' => 'Could not create Firebase account for this email.'], 502);
+        }
 
         return $this->sendOtpTo($email, 'Verification code has been sent to your email.');
     }
