@@ -152,6 +152,25 @@ class AuthController extends Controller
         return User::create($userData);
     }
 
+    private function ensureFirebaseEmailPasswordUser(User $user, string $password): bool
+    {
+        if ($user->firebase_uid) {
+            return true;
+        }
+
+        $firebaseUid = $this->firebaseAuth->syncEmailPasswordUser($user->email, $password);
+        if (!$firebaseUid) {
+            return false;
+        }
+
+        $user->forceFill([
+            'firebase_uid' => $firebaseUid,
+            'is_password_set' => true,
+        ])->save();
+
+        return true;
+    }
+
     public function register(Request $request)
     {
         $validated = $request->validate([
@@ -239,17 +258,8 @@ class AuthController extends Controller
             return response()->json(['message' => 'Account is ' . $user->status], 403);
         }
 
-        $firebaseSynced = false;
-        if (!$user->firebase_uid) {
-            $firebaseUid = $this->firebaseAuth->syncEmailPasswordUser($user->email, $validated['password']);
-            if ($firebaseUid) {
-                $user->forceFill([
-                    'firebase_uid' => $firebaseUid,
-                    'is_password_set' => true,
-                ])->save();
-                $firebaseSynced = true;
-            }
-        }
+        $hadFirebaseUid = (bool) $user->firebase_uid;
+        $firebaseSynced = $this->ensureFirebaseEmailPasswordUser($user, $validated['password']) && !$hadFirebaseUid;
 
         return response()->json([
             'message' => 'Legacy credentials verified.',
@@ -321,10 +331,10 @@ class AuthController extends Controller
         if (!$user || !$this->validOtp($request->email, $request->code)) return response()->json(['message' => 'Invalid request.'], 400);
 
         if (!$user->firebase_uid) {
-            return response()->json(['message' => 'This account is not linked to Firebase. Please contact support.'], 409);
-        }
-
-        if (!$this->firebaseAuth->updatePassword($user->firebase_uid, $request->password)) {
+            if (!$this->ensureFirebaseEmailPasswordUser($user, $request->password)) {
+                return response()->json(['message' => 'Could not create Firebase account.'], 502);
+            }
+        } elseif (!$this->firebaseAuth->updatePassword($user->firebase_uid, $request->password)) {
             return response()->json(['message' => 'Could not update Firebase password.'], 502);
         }
 
@@ -491,12 +501,22 @@ class AuthController extends Controller
             'password' => 'required|min:8|confirmed',
         ]);
 
-        $authOk = ($validated['current_password'] && Hash::check($validated['current_password'], $user->password))
-                  || ($validated['code'] && $this->validOtp($user->email, $validated['code']));
+        $currentPassword = $validated['current_password'] ?? null;
+        $code = $validated['code'] ?? null;
+        $currentPasswordOk = $currentPassword && Hash::check($currentPassword, $user->password);
+        $codeOk = $code && $this->validOtp($user->email, $code);
+        $authOk = $currentPasswordOk || $codeOk;
 
         if (!$authOk) return response()->json(['message' => 'Invalid authentication.'], 422);
 
-        if ($user->firebase_uid && !$this->firebaseAuth->updatePassword($user->firebase_uid, $validated['password'])) {
+        if (!$user->firebase_uid) {
+            $syncPassword = $currentPasswordOk ? $currentPassword : $validated['password'];
+            if (!$this->ensureFirebaseEmailPasswordUser($user, $syncPassword)) {
+                return response()->json(['message' => 'Could not create Firebase account.'], 502);
+            }
+        }
+
+        if (!$this->firebaseAuth->updatePassword($user->firebase_uid, $validated['password'])) {
             return response()->json(['message' => 'Could not update Firebase password.'], 502);
         }
 
@@ -504,7 +524,7 @@ class AuthController extends Controller
         $user->is_password_set = true;
         $user->save();
 
-        if ($validated['code']) Otp::where('email', strtolower($user->email))->delete();
+        if ($code) Otp::where('email', strtolower($user->email))->delete();
 
         return response()->json(['message' => 'Password changed.']);
     }

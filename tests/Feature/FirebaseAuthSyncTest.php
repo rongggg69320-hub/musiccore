@@ -1,8 +1,10 @@
 <?php
 
 use App\Models\User;
+use App\Models\Otp;
 use App\Services\FirebaseAuthService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Laravel\Sanctum\Sanctum;
 
 uses(RefreshDatabase::class);
 
@@ -138,5 +140,86 @@ test('legacy verification does not sync firebase when database password is inval
     $this->assertDatabaseHas('users', [
         'email' => 'wrongpass@example.com',
         'firebase_uid' => null,
+    ]);
+});
+
+test('reset password creates firebase account when backend user has no firebase uid', function () {
+    $role = \App\Models\Role::firstOrCreate(['role_name' => 'user']);
+
+    User::create([
+        'role_id' => $role->id,
+        'username' => 'resetuser',
+        'email' => 'reset@example.com',
+        'password' => bcrypt('oldpass123'),
+        'status' => 'active',
+    ]);
+
+    Otp::create([
+        'email' => 'reset@example.com',
+        'otp' => '123456',
+        'expires_at' => now()->addMinutes(15),
+    ]);
+
+    $this->mock(FirebaseAuthService::class, function ($mock) {
+        $mock->shouldReceive('syncEmailPasswordUser')
+            ->once()
+            ->with('reset@example.com', 'newpass123')
+            ->andReturn('firebase-reset-uid');
+        $mock->shouldNotReceive('updatePassword');
+    });
+
+    $response = $this->postJson('/api/reset-password', [
+        'email' => 'reset@example.com',
+        'code' => '123456',
+        'password' => 'newpass123',
+        'password_confirmation' => 'newpass123',
+    ]);
+
+    $response->assertOk()->assertJsonPath('message', 'Password reset.');
+
+    $this->assertDatabaseHas('users', [
+        'email' => 'reset@example.com',
+        'firebase_uid' => 'firebase-reset-uid',
+        'is_password_set' => true,
+    ]);
+    $this->assertDatabaseMissing('otps', ['email' => 'reset@example.com']);
+});
+
+test('change password syncs missing firebase account before updating firebase password', function () {
+    $role = \App\Models\Role::firstOrCreate(['role_name' => 'user']);
+
+    $user = User::create([
+        'role_id' => $role->id,
+        'username' => 'changepass',
+        'email' => 'change@example.com',
+        'password' => bcrypt('oldpass123'),
+        'status' => 'active',
+    ]);
+
+    Sanctum::actingAs($user);
+
+    $this->mock(FirebaseAuthService::class, function ($mock) {
+        $mock->shouldReceive('syncEmailPasswordUser')
+            ->once()
+            ->with('change@example.com', 'oldpass123')
+            ->andReturn('firebase-change-uid');
+        $mock->shouldReceive('updatePassword')
+            ->once()
+            ->with('firebase-change-uid', 'newpass123')
+            ->andReturn(true);
+    });
+
+    $response = $this->postJson('/api/user/change-password', [
+        'current_password' => 'oldpass123',
+        'password' => 'newpass123',
+        'password_confirmation' => 'newpass123',
+    ]);
+
+    $response->assertOk()->assertJsonPath('message', 'Password changed.');
+
+    $this->assertDatabaseHas('users', [
+        'email' => 'change@example.com',
+        'firebase_uid' => 'firebase-change-uid',
+        'is_password_set' => true,
     ]);
 });
