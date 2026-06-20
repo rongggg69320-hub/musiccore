@@ -29,7 +29,7 @@ class User extends Authenticatable
         'status',
     ];
 
-    protected $appends = ['profile_image_url', 'profile_pic_url', 'name'];
+    protected $appends = ['profile_image_url', 'profile_pic_url', 'name', 'connected_providers', 'connected_provider'];
 
     public function getProfileImageUrlAttribute()
     {
@@ -48,6 +48,19 @@ class User extends Authenticatable
     public function getNameAttribute()
     {
         return $this->username;
+    }
+
+    public function getConnectedProvidersAttribute()
+    {
+        return collect([
+            'google' => $this->google_id,
+            'facebook' => $this->facebook_id,
+        ])->filter()->keys()->values()->all();
+    }
+
+    public function getConnectedProviderAttribute()
+    {
+        return $this->connected_providers[0] ?? null;
     }
 
     protected $hidden = [

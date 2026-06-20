@@ -472,7 +472,9 @@ class AuthController extends Controller
             return response()->json(['message' => 'Firebase account is already connected to another user.'], 409);
         }
 
-        $user->firebase_uid = $profile['id'];
+        if (!$user->firebase_uid) {
+            $user->firebase_uid = $profile['id'];
+        }
         $user->$column = $profile['id'];
         $user->social_provider = $request->provider;
         $user->social_id = $profile['id'];
@@ -488,6 +490,14 @@ class AuthController extends Controller
 
         $column = $request->provider === 'google' ? 'google_id' : 'facebook_id';
         $user->$column = null;
+        if ($user->social_provider === $request->provider) {
+            $remainingProvider = $request->provider === 'google'
+                ? ($user->facebook_id ? 'facebook' : null)
+                : ($user->google_id ? 'google' : null);
+
+            $user->social_provider = $remainingProvider;
+            $user->social_id = $remainingProvider ? $user->{$this->providerColumn($remainingProvider)} : null;
+        }
         $user->save();
 
         return response()->json(['message' => 'Disconnected.', 'user' => $user]);
