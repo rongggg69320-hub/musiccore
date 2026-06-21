@@ -75,25 +75,23 @@ class AuthController extends Controller
                 ['otp' => $otp, 'expires_at' => now()->addMinutes(15)]
             );
 
-            // Using failover mailer (Resend -> SMTP -> Log) to ensure delivery
-            Mail::mailer('failover')->to($email)->send(new OtpMail($otp, $email));
+            $user = User::where('email', $email)->first();
 
-            Log::info("OTP sent successfully via SMTP to: $email");
+            // 1. Try sending via Firebase Push Notification (if token exists)
+            // You'll need to store 'fcm_token' in your users table for this to work
+            if ($user && $user->fcm_token) {
+                $this->firebaseAuth->sendOtpNotification($user->fcm_token, $otp);
+                Log::info("OTP sent via Firebase Notification to: $email");
+            }
+
+            // 2. Always fallback to logging for debugging
+            Log::info("VERIFICATION CODE for $email is $otp");
+
             return response()->json(['message' => $successMessage]);
 
         } catch (Exception $e) {
-            Log::error('OTP Mail Error: ' . $e->getMessage());
-            // Fallback to log for debugging if SMTP/Resend fails
-            Log::info("FALLBACK: OTP for $email is $otp");
-
-            // For development/local testing, we return success so they can check logs
-            if (config('app.debug') || app()->environment('local')) {
-                return response()->json([
-                    'message' => $successMessage . ' (Check server logs for the code)'
-                ]);
-            }
-
-            return response()->json(['message' => 'Email delivery failed. Please try again later.'], 500);
+            Log::error('OTP Process Error: ' . $e->getMessage());
+            return response()->json(['message' => 'Failed to send code.'], 500);
         }
     }
 

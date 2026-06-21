@@ -247,6 +247,42 @@ class FirebaseAuthService
         }
     }
 
+    public function sendOtpNotification(string $fcmToken, string $otp): bool
+    {
+        try {
+            $projectId = config('services.firebase.project_id');
+            $accessToken = $this->accessToken();
+
+            if (!$projectId || !$accessToken) {
+                return false;
+            }
+
+            $response = Http::withToken($accessToken)->post(
+                "https://fcm.googleapis.com/v1/projects/{$projectId}/messages:send",
+                [
+                    'message' => [
+                        'token' => $fcmToken,
+                        'notification' => [
+                            'title' => 'Security Code',
+                            'body' => "Your MusicStream verification code is: $otp",
+                        ],
+                        'android' => [
+                            'priority' => 'high',
+                            'notification' => [
+                                'channel_id' => 'security_alerts',
+                            ],
+                        ],
+                    ],
+                ]
+            );
+
+            return $response->successful();
+        } catch (Exception $e) {
+            Log::error('FCM OTP Send Error: ' . $e->getMessage());
+            return false;
+        }
+    }
+
     private function signInEmailPasswordUser(string $email, string $password): ?array
     {
         $apiKey = config('services.firebase.api_key');
