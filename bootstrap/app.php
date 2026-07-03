@@ -12,7 +12,8 @@ return Application::configure(basePath: dirname(__DIR__))
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware): void {
-        //
+        $middleware->statefulApi(); // For SPA/Web apps
+        $middleware->validateCertificates(false); // Only if you have local SSL issues
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         //
