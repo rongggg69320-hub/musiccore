@@ -25,7 +25,7 @@ Route::get('/albums/public', [AlbumController::class, 'publicAlbums']);
 Route::get('/genres/{id}/tracks', [UploadController::class, 'genreTracks']);
 
 // Protected Routes
-Route::middleware('auth:sanctum')->group(function () {
+Route::middleware(['auth:sanctum', 'check.status'])->group(function () {
 
     Route::get('/me', [AuthController::class, 'profile']);
     Route::post('/logout', [AuthController::class, 'logout']);

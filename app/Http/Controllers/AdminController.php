@@ -10,6 +10,7 @@ use App\Models\User;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Validation\Rule;
 use Illuminate\View\View;
@@ -216,6 +217,11 @@ class AdminController extends Controller
         $newStatus = $user->status === 'suspended' ? 'active' : 'suspended';
         $user->update(['status' => $newStatus]);
 
+        if ($newStatus === 'suspended') {
+            // Log out the user from all devices immediately
+            $user->tokens()->delete();
+        }
+
         return back()->with('success', $newStatus === 'suspended' ? 'User suspended.' : 'User unsuspended.');
     }
 
@@ -227,6 +233,8 @@ class AdminController extends Controller
 
         $validated = $request->validate(['name' => 'required|string|max:80|unique:genres,name']);
         Genre::create($validated);
+
+        Cache::forget('genres_list');
 
         return redirect()->route('admin.genres.index')->with('success', 'Genre added.');
     }
@@ -240,6 +248,8 @@ class AdminController extends Controller
         $validated = $request->validate(['name' => 'required|string|max:80|unique:genres,name,' . $genre->id]);
         $genre->update($validated);
 
+        Cache::forget('genres_list');
+
         return back()->with('success', 'Genre updated.');
     }
 
@@ -250,6 +260,8 @@ class AdminController extends Controller
         }
 
         $genre->delete();
+
+        Cache::forget('genres_list');
 
         return back()->with('success', 'Genre deleted.');
     }
