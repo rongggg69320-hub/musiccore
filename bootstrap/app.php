@@ -14,6 +14,7 @@ return Application::configure(basePath: dirname(__DIR__))
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->statefulApi(); // For SPA/Web apps
         $middleware->validateCertificates(false); // Only if you have local SSL issues
+<<<<<<< HEAD
 
         $middleware->alias([
             'check.status' => \App\Http\Middleware\CheckUserStatus::class,
@@ -22,6 +23,8 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->appendToGroup('api', [
             \App\Http\Middleware\CheckUserStatus::class,
         ]);
+=======
+>>>>>>> 8c54516e6132e3c91e402289761ec5a395adc70f
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         //
