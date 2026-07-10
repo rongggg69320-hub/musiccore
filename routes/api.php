@@ -19,6 +19,9 @@ Route::post('/verify-code', [AuthController::class, 'verifyCode']);
 Route::post('/reset-password', [AuthController::class, 'resetPassword']);
 Route::get('/genres', [UploadController::class, 'listGenres']);
 Route::get('/tracks/public', [UploadController::class, 'publicTracks']);
+Route::get('/tracks/new-releases', [UploadController::class, 'newReleases']);
+Route::get('/tracks/radio', [UploadController::class, 'radio']);
+Route::get('/albums/new-releases', [AlbumController::class, 'newReleases']);
 Route::get('/search', [UploadController::class, 'search']);
 Route::get('/users/{id}', [UploadController::class, 'showUser']);
 Route::get('/albums/public', [AlbumController::class, 'publicAlbums']);
@@ -40,8 +43,6 @@ Route::middleware(['auth:sanctum', 'check.status'])->group(function () {
 
     // Tracks
     Route::post('/tracks/upload', [UploadController::class, 'upload']);
-    Route::get('/tracks/radio', [UploadController::class, 'radio']);
-    Route::get('/tracks/new-releases', [UploadController::class, 'newReleases']);
     Route::get('/tracks', [UploadController::class, 'index']);
     Route::get('/tracks/{id}', [UploadController::class, 'show']);
     Route::post('/tracks/{id}', [UploadController::class, 'update']);
@@ -49,7 +50,6 @@ Route::middleware(['auth:sanctum', 'check.status'])->group(function () {
     Route::delete('/tracks/{id}', [UploadController::class, 'destroy']);
 
     // Albums
-    Route::get('/albums/new-releases', [AlbumController::class, 'newReleases']);
     Route::get('/albums/{id}/tracks', [AlbumController::class, 'tracks']);
     Route::apiResource('albums', AlbumController::class)->except(['create', 'edit']);
 
